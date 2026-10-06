@@ -1,0 +1,43 @@
+--- a/block.c
++++ b/block.c
+@@ -1103,6 +1103,28 @@
+ 	return &m;
+ }
+ 
++static bool ramboot_internal_data(const char *device)
++{
++	char path[128], name[64];
++	const char *base = strrchr(device, '/');
++	FILE *fp;
++	bool skip = false;
++
++	if (access("/etc/hg5585f-ramboot", F_OK))
++		return false;
++	base = base ? base + 1 : device;
++	if (strncmp(base, "ubi", 3) || strchr(base, '/'))
++		return false;
++	snprintf(path, sizeof(path), "/sys/class/ubi/%s/name", base);
++	fp = fopen(path, "r");
++	if (!fp)
++		return false;
++	if (fgets(name, sizeof(name), fp))
++		skip = !strcmp(name, "rootfs_data\n") || !strcmp(name, "rootfs_data");
++	fclose(fp);
++	return skip;
++}
++
+ static int mount_device(struct probe_info *pr, const char *options, int type)
+ {
+ 	struct mount *m;
+@@ -1115,6 +1137,11 @@
+ 
+ 	if (!pr)
+ 		return -1;
++
++	if (ramboot_internal_data(pr->dev)) {
++		ULOG_INFO("RAM recovery: leaving installed overlay %s unmounted\n", pr->dev);
++		return 0;
++	}
+ 
+ 	device = basename(pr->dev);
+ 

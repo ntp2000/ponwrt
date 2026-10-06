@@ -1,0 +1,85 @@
+--- a/web/src/components/interfacer/item.vue
++++ b/web/src/components/interfacer/item.vue
+@@ -1,7 +1,7 @@
+ <template>
+     <div class="app-container_status-label_bg" :style="`transform: translateX(${transform}px);`" ref="el"
+         @mouseenter="onMouseenter" @mouseleave="onMouseleave">
+-        <template v-if="item.linkState == 'DOWN'">
++        <template v-if="linkStatus(item.linkState) !== 'connected'">
+             <div class="app-container_status-label_iconer">
+                 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+                     xmlns:v="https://vecta.io/nano" width="48" height="38" viewBox="0 0 12.7 10.05">
+@@ -35,7 +35,7 @@
+                 </svg>
+             </div>
+             <div class="app-container_status-label_text">
+-                <div class="text_status">{{ $gettext("已断开") }}</div>
++                <div class="text_status">{{ linkStatus(item.linkState) === 'disconnected' ? $gettext("已断开") : $gettext("未知") }}</div>
+                 <div class="text_info">
+                     {{ item.name }}
+                     {{ item.interfaceNames ? `(${item.interfaceNames.join(",").toLocaleUpperCase()})` : "" }}
+@@ -86,6 +86,7 @@
+     </div>
+ </template>
+ <script setup lang="ts">
++import { linkStatus } from '/@/utils/link-state';
+ import { computed, PropType, reactive, ref } from 'vue';
+ import { useGettext,formatNumber } from '/@/plugins/i18n'
+ const { $gettext,$ngettext } = useGettext()
+--- a/web/src/pages/index/network/NetworkInterface.vue
++++ b/web/src/pages/index/network/NetworkInterface.vue
+@@ -26,8 +26,8 @@
+             <div class="item" v-for="item in porter.portList" v-if="porter.load" ref="el"
+                 @mouseenter="onMouseenter(item, $event)" @mouseleave="onMouseleave">
+                 <!-- <div class="item" v-for="item in portList" v-if="porter.load" ref="el" @click="goNetwork"> -->
+-                <div class="icon_box" :style="{ backgroundColor: item.linkState == 'DOWN' ? '#f3f4f6' : '#dbfce7' }">
+-                    <interfaceIcon :color="item.linkState == 'DOWN' ? '#99a1af' : '#00a63e'" class="icon2" />
++                <div class="icon_box" :style="{ backgroundColor: linkStatus(item.linkState) === 'connected' ? '#dbfce7' : '#f3f4f6' }">
++                    <interfaceIcon :color="linkStatus(item.linkState) === 'connected' ? '#00a63e' : '#99a1af'" class="icon2" />
+                 </div>
+                 <div>
+                     <div class="name">
+@@ -35,14 +35,15 @@
+                             `(${item.interfaceNames.join(",").toLocaleUpperCase()})` : ""
+                         }}
+                         <!-- <div class="speed" v-if="item.linkSpeed">{{ item.linkSpeed }}</div> -->
+-                        <div class="speed" v-if="item.linkState == 'DOWN'" style="background: #f3f4f6;color: #4a5565;">
++                        <div class="speed" v-if="linkStatus(item.linkState) === 'disconnected'" style="background: #f3f4f6;color: #4a5565;">
+                             {{
+                                 $gettext("已断开") }}</div>
+                     </div>
+                     <div style="display: flex;align-items: center;">
+-                        <div class="status" v-if="item.linkState == 'DOWN'">{{ $gettext("未连接") }}</div>
+-                        <div class="status" v-else>{{ $gettext("已连接") }}</div>
+-                        <div class="speed" v-if="item.linkSpeed" style="margin-left: 6px;">{{ item.linkSpeed }}</div>
++                        <div class="status" v-if="linkStatus(item.linkState) === 'connected'">{{ $gettext("已连接") }}</div>
++                        <div class="status" v-else-if="linkStatus(item.linkState) === 'disconnected'">{{ $gettext("未连接") }}</div>
++                        <div class="status" v-else>{{ $gettext("未知") }}</div>
++                        <div class="speed" v-if="linkStatus(item.linkState) === 'connected' && item.linkSpeed" style="margin-left: 6px;">{{ item.linkSpeed }}</div>
+                     </div>
+                 </div>
+             </div>
+@@ -51,6 +52,7 @@
+ </template>
+ 
+ <script lang="ts" setup>
++import { linkStatus } from '/@/utils/link-state';
+ import Card from "../components/Card.vue"
+ import interfaceIcon from "/@/components/svg/interface.vue"
+ import settingIcon from "/@/components/svg/setting.vue"
+--- /dev/null
++++ b/web/src/utils/link-state.ts
+@@ -0,0 +1,13 @@
++export function linkStatus(state: unknown): 'connected' | 'disconnected' | 'unknown' {
++    const value = typeof state === 'string' ? state.trim().toUpperCase() : '';
++    switch (value) {
++        case 'UP':
++            return 'connected';
++        case 'DOWN':
++        case 'LOWERLAYERDOWN':
++        case 'NOTPRESENT':
++            return 'disconnected';
++        default:
++            return 'unknown';
++    }
++}

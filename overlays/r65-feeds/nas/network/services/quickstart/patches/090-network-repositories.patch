@@ -1,0 +1,639 @@
+--- a/backend/modules/guidestorage/routes.go
++++ b/backend/modules/guidestorage/routes.go
+@@ -4,9 +4,9 @@
+ 	"context"
+ 	"net/http"
+ 
+-	"github.com/julienschmidt/httprouter"
+ 	"github.com/istoreos/quickstart/backend/internal/httpapi"
+ 	"github.com/istoreos/quickstart/backend/models"
++	"github.com/julienschmidt/httprouter"
+ )
+ 
+ type Backend interface {
+@@ -63,6 +63,25 @@
+ 		return backend.PostGuideDockerSwitch(ctx, r)
+ 	})
+ 
++	RegisterSoftSourceRoutes(router, backend)
++
++	httpapi.GetJSON(router, "/cgi-bin/luci/istore/guide/global-folders/", func(ctx context.Context, r *http.Request) (any, error) {
++		return backend.GetGlobalFolders(ctx)
++	})
++
++	httpapi.PostJSON(router, "/cgi-bin/luci/istore/guide/global-folders/", func(ctx context.Context, r *http.Request) (any, error) {
++		return backend.PostGlobalFolders(ctx, r)
++	})
++}
++
++type SoftSourceBackend interface {
++	GetGuideSoftSource(ctx context.Context) (*models.GuideSoftSourceResponse, error)
++	PostGuideSoftSource(ctx context.Context, r *http.Request) (*models.GuideSoftSourceResponse, error)
++	GetGuideSoftSourceList(ctx context.Context) (*models.GuideSoftSourceListResponse, error)
++}
++
++// Router-only devices need software mirrors without enabling storage handlers.
++func RegisterSoftSourceRoutes(router *httprouter.Router, backend SoftSourceBackend) {
+ 	httpapi.GetJSON(router, "/cgi-bin/luci/istore/guide/soft-source/", func(ctx context.Context, r *http.Request) (any, error) {
+ 		return backend.GetGuideSoftSource(ctx)
+ 	})
+@@ -75,11 +94,4 @@
+ 		return backend.GetGuideSoftSourceList(ctx)
+ 	})
+ 
+-	httpapi.GetJSON(router, "/cgi-bin/luci/istore/guide/global-folders/", func(ctx context.Context, r *http.Request) (any, error) {
+-		return backend.GetGlobalFolders(ctx)
+-	})
+-
+-	httpapi.PostJSON(router, "/cgi-bin/luci/istore/guide/global-folders/", func(ctx context.Context, r *http.Request) (any, error) {
+-		return backend.PostGlobalFolders(ctx, r)
+-	})
+ }
+--- /dev/null
++++ b/backend/server/airoha_soft_source_test.go
+@@ -0,0 +1,21 @@
++package server
++
++import (
++	"testing"
++
++	"github.com/julienschmidt/httprouter"
++)
++
++func TestAirohaSoftwareSourceRoutes(t *testing.T) {
++	router := RouterInit(nil).(*httprouter.Router)
++	for _, route := range [][2]string{
++		{"GET", "/cgi-bin/luci/istore/guide/soft-source/"},
++		{"POST", "/cgi-bin/luci/istore/guide/soft-source/"},
++		{"GET", "/cgi-bin/luci/istore/guide/soft-source/list/"},
++	} {
++		handler, _, _ := router.Lookup(route[0], route[1])
++		if handler == nil {
++			t.Errorf("missing software-source route: %v", route)
++		}
++	}
++}
+--- a/backend/server/guide_storage_routes.go
++++ b/backend/server/guide_storage_routes.go
+@@ -1,9 +1,9 @@
+ package server
+ 
+ import (
+-	"github.com/julienschmidt/httprouter"
+ 	"github.com/istoreos/quickstart/backend/modules/guidestorage"
+ 	"github.com/istoreos/quickstart/backend/service"
++	"github.com/julienschmidt/httprouter"
+ )
+ 
+ var _ guidestorage.Backend = (*service.ServiceBackend)(nil)
+@@ -11,3 +11,7 @@
+ func registerGuideStorageRoutes(router *httprouter.Router, serviceBackend *service.ServiceBackend) {
+ 	guidestorage.RegisterRoutes(router, serviceBackend)
+ }
++
++func registerGuideSoftSourceRoutes(router *httprouter.Router, serviceBackend *service.ServiceBackend) {
++	guidestorage.RegisterSoftSourceRoutes(router, serviceBackend)
++}
+--- /dev/null
++++ b/backend/service/airoha_network_test.go
+@@ -0,0 +1,72 @@
++package service
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestAirohaAPKProbeAndRepositoryRoot(t *testing.T) {
++	for _, root := range guideSoftSourceURLs {
++		for _, branch := range []string{"snapshots", "releases/25.12-SNAPSHOT"} {
++			u := root + branch + "/packages/aarch64_cortex-a53/base/packages.adb"
++			got, err := apkFeedProbeURL("# " + u + ".asc\n \t" + u + "\r\n")
++			if err != nil || got != u {
++				t.Fatalf("probe = %q, %v", got, err)
++			}
++			got, err = getApkDistFeedUrlByContent(u)
++			if err != nil || got != root {
++				t.Fatalf("root = %q, %v, want %q", got, err, root)
++			}
++		}
++	}
++	for _, bad := range []string{
++		"", "# https://test/base/packages.adb", "https://test/base/packages.adb.asc",
++		"file:///base/packages.adb", "https://user:secret@test/base/packages.adb",
++		"https://test/'/base/packages.adb", "https://test/base/packages.adb?x=1",
++	} {
++		if u, err := apkFeedProbeURL(bad); err == nil {
++			t.Fatalf("accepted malformed probe %q", u)
++		}
++	}
++}
++
++func TestAirohaSourceSwitchPreservesBranchThirdPartyAndLiveEdits(t *testing.T) {
++	dir := t.TempDir()
++	target, rom := filepath.Join(dir, "live"), filepath.Join(dir, "rom")
++	zju, official := guideSoftSourceURLs[0], guideSoftSourceURLs[1]
++	base := "snapshots/packages/aarch64_cortex-a53/base/packages.adb"
++	keep := "# " + official + base + "\n" +
++		"https://istore.istoreos.com/repo-apk/all/store/packages.adb\n" +
++		"file:///my-repo/packages.adb\n" +
++		official + "releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/base/packages.adb\n" +
++		official + "snapshots/packages/aarch64_cortex-a53/nas/packages.adb\n"
++	live := official + base + "\n" + keep
++	if err := os.WriteFile(target, []byte(live), 0600); err != nil { t.Fatal(err) }
++	if err := os.WriteFile(rom, []byte("do not restore this"), 0644); err != nil { t.Fatal(err) }
++	if err := replaceGuideSoftSource(zju, rom, target); err != nil { t.Fatal(err) }
++	result, _ := os.ReadFile(target)
++	if string(result) != zju+base+"\n"+keep { t.Fatalf("unexpected replacement: %s", result) }
++	info, _ := os.Stat(target)
++	if info.Mode().Perm() != 0600 { t.Fatal("lost permissions") }
++	if err := replaceGuideSoftSource(official, rom, target); err != nil { t.Fatal(err) }
++	result, _ = os.ReadFile(target)
++	if string(result) != live { t.Fatal("mirror switch is not reversible") }
++	if err := replaceGuideSoftSource("https://evil.invalid/", rom, target); err == nil {
++		t.Fatal("accepted unknown mirror")
++	}
++	result, _ = os.ReadFile(target)
++	if string(result) != live { t.Fatal("failed switch modified live file") }
++	left, _ := filepath.Glob(filepath.Join(dir, ".quickstart-feeds-*"))
++	if len(left) != 0 { t.Fatal("temporary file remains") }
++}
++
++func TestAirohaCatalogDoesNotOfferOpenWrtOrUnavailableMirrors(t *testing.T) {
++	if len(guideSoftSourceIdentities) != 2 { t.Fatal("unexpected catalog") }
++	for _, root := range guideSoftSourceURLs {
++		if strings.Contains(root, "/openwrt") || strings.Contains(root, "ustc") {
++			t.Fatalf("incorrect default catalog URL %s", root)
++		}
++	}
++}
+--- a/backend/service/guide_soft_source_store.go
++++ b/backend/service/guide_soft_source_store.go
+@@ -3,10 +3,10 @@
+ import (
+ 	"context"
+ 	"errors"
+-	"fmt"
+ 	"io/ioutil"
+ 	"net/url"
+ 	"os"
++	"path/filepath"
+ 	"regexp"
+ 	"strings"
+ 
+@@ -23,7 +23,7 @@
+ }
+ 
+ var readGuideSoftSourceFile = ioutil.ReadFile
+-var writeGuideSoftSourceFile = ioutil.WriteFile
++var writeGuideSoftSourceFile = writeSoftSourceAtomically
+ var statGuideSoftSourceFile = os.Stat
+ 
+ type defaultGuideSoftSourceReader struct{}
+@@ -48,16 +48,7 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	parsed, err := url.Parse(feedURL)
+-	if err != nil {
+-		return nil, errors.New("解析base软件源信息失败")
+-	}
+-
+-	normalizedURL := fmt.Sprintf("%v://%v/openwrt/", parsed.Scheme, parsed.Host)
+-	if strings.Contains(parsed.Host, "openwrt") {
+-		normalizedURL = fmt.Sprintf("%v://%v/", parsed.Scheme, parsed.Host)
+-	}
+-	source := resolveGuideSoftSourceByURL(normalizedURL)
++	source := resolveGuideSoftSourceByURL(feedURL)
+ 	return &source, nil
+ }
+ 
+@@ -78,15 +69,25 @@
+ }
+ 
+ func getApkDistFeedUrlByContent(content string) (string, error) {
+-	found := matchStringOnce(content, `(?m)^(https?:\/\/[^\/]*\/(openwrt\/)?).*\/base\/packages\.adb$`)
+-	if found == nil {
+-		return "", errors.New("apk feed not found")
++	probe, err := apkFeedProbeURL(content)
++	if err != nil {
++		return "", err
+ 	}
+-	return found[1], nil
++	parsed, err := url.Parse(probe)
++	if err != nil {
++		return "", err
++	}
++	for _, marker := range []string{"/snapshots/", "/releases/"} {
++		if pos := strings.Index(parsed.Path, marker); pos >= 0 {
++			parsed.Path = parsed.Path[:pos+1]
++			return parsed.String(), nil
++		}
++	}
++	return "", errors.New("apk repository branch not found")
+ }
+ 
+ func getOpkgDistFeedUrlByContent(content string) (string, error) {
+-	found := matchStringOnce(content, `_base\s+(https?:\/\/[^\/]*\/(openwrt\/)?)`)
++	found := matchStringOnce(content, `_base\s+(https?:\/\/[^\/]*\/((openwrt|immortalwrt)\/)?)`)
+ 	if found == nil {
+ 		return "", errors.New("feed not found")
+ 	}
+@@ -118,15 +119,39 @@
+ }
+ 
+ func replaceGuideSoftSource(sourceURL, sourceFile, targetFile string) error {
+-	data, err := readGuideSoftSourceFile(sourceFile)
++	if resolveGuideSoftSourceByURL(sourceURL).Identity == sourceURL {
++		return errors.New("unsupported ImmortalWrt mirror")
++	}
++	// Prefer the live file: do not lose local edits by reloading the ROM copy.
++	data, err := readGuideSoftSourceFile(targetFile)
+ 	if err != nil {
+-		data, err = readGuideSoftSourceFile(targetFile)
++		data, err = readGuideSoftSourceFile(sourceFile)
+ 		if err != nil {
+ 			return err
+ 		}
+ 	}
+-	urlRegex := regexp.MustCompile(`https?:\/\/[^\/]*\/(openwrt\/)?`)
+-	newFeeds := urlRegex.ReplaceAllString(string(data), sourceURL)
++	lines := strings.Split(string(data), "\n")
++	changed := false
++	// Rebase only this build's public snapshots repositories. Never rewrite
++	// custom feeds, iStore, comments, release branches, or file:// repositories.
++	for i, line := range lines {
++		for _, root := range guideSoftSourceURLs {
++			if !strings.HasPrefix(line, root+"snapshots/") {
++				continue
++			}
++			suffix := strings.TrimPrefix(line, root)
++			if !publicSnapshotPath.MatchString(suffix) {
++				continue
++			}
++			lines[i] = sourceURL + suffix
++			changed = true
++			break
++		}
++	}
++	if !changed {
++		return errors.New("no supported ImmortalWrt snapshots repositories")
++	}
++	newFeeds := strings.Join(lines, "\n")
+ 
+ 	fileMode := os.FileMode(0644)
+ 	if fi, err := statGuideSoftSourceFile(targetFile); err == nil {
+@@ -134,3 +159,27 @@
+ 	}
+ 	return writeGuideSoftSourceFile(targetFile, []byte(newFeeds), fileMode)
+ }
++
++var publicSnapshotPath = regexp.MustCompile(`^snapshots/(packages/aarch64_cortex-a53/(base|luci|packages|routing|telephony)|targets/airoha/(an7581|an7583)/packages)/packages\.adb$`)
++
++func writeSoftSourceAtomically(path string, data []byte, mode os.FileMode) error {
++	file, err := os.CreateTemp(filepath.Dir(path), ".quickstart-feeds-*")
++	if err != nil {
++		return err
++	}
++	defer os.Remove(file.Name())
++	defer file.Close()
++	if err = file.Chmod(mode.Perm()); err != nil {
++		return err
++	}
++	if _, err = file.Write(data); err != nil {
++		return err
++	}
++	if err = file.Sync(); err != nil {
++		return err
++	}
++	if err = file.Close(); err != nil {
++		return err
++	}
++	return os.Rename(file.Name(), path)
++}
+--- a/backend/service/guide_soft_source_store_test.go
++++ b/backend/service/guide_soft_source_store_test.go
+@@ -11,17 +11,17 @@
+ func TestBuildGuideSoftSourceByIndexPreservesCatalogOrder(t *testing.T) {
+ 	t.Parallel()
+ 
+-	if len(guideSoftSourceIdentities) != 8 {
++	if len(guideSoftSourceIdentities) != 2 {
+ 		t.Fatalf("unexpected source count: %d", len(guideSoftSourceIdentities))
+ 	}
+ 
+ 	source := buildGuideSoftSourceByIndex(guideSoftSourceIdentities[0], 0)
+-	if source.Identity != "OpenWrtHttp" || source.Name != "OpenWRT(HTTP)" || source.URL != "http://downloads.openwrt.org/" {
++	if source.Identity != "ZJU" || source.Name != "浙江大学（ImmortalWrt snapshots）" || source.URL != "https://mirrors.zju.edu.cn/immortalwrt/" {
+ 		t.Fatalf("unexpected first source: %#v", source)
+ 	}
+ 
+-	last := buildGuideSoftSourceByIndex(guideSoftSourceIdentities[7], 7)
+-	if last.Identity != "Tencent Cloud" || last.Name != "腾讯云" || last.URL != "https://mirrors.cloud.tencent.com/openwrt/" {
++	last := buildGuideSoftSourceByIndex(guideSoftSourceIdentities[1], 1)
++	if last.Identity != "ImmortalWrt" || last.Name != "ImmortalWrt 官方（snapshots）" || last.URL != "https://downloads.immortalwrt.org/" {
+ 		t.Fatalf("unexpected last source: %#v", last)
+ 	}
+ }
+@@ -29,8 +29,8 @@
+ func TestResolveGuideSoftSourceByIdentityReturnsKnownSource(t *testing.T) {
+ 	t.Parallel()
+ 
+-	source := resolveGuideSoftSourceByIdentity("USTC")
+-	if source.Identity != "USTC" || source.Name != "中国科学技术大学" || source.URL != "https://mirrors.ustc.edu.cn/openwrt/" {
++	source := resolveGuideSoftSourceByIdentity("ZJU")
++	if source.Identity != "ZJU" || source.Name != "浙江大学（ImmortalWrt snapshots）" || source.URL != "https://mirrors.zju.edu.cn/immortalwrt/" {
+ 		t.Fatalf("unexpected identity mapping: %#v", source)
+ 	}
+ }
+@@ -47,8 +47,8 @@
+ func TestResolveGuideSoftSourceByURLReturnsKnownSource(t *testing.T) {
+ 	t.Parallel()
+ 
+-	source := resolveGuideSoftSourceByURL("https://mirrors.aliyun.com/openwrt/")
+-	if source.Identity != "Alibaba Cloud" || source.Name != "阿里云" || source.URL != "https://mirrors.aliyun.com/openwrt/" {
++	source := resolveGuideSoftSourceByURL("https://downloads.immortalwrt.org/")
++	if source.Identity != "ImmortalWrt" || source.Name != "ImmortalWrt 官方（snapshots）" || source.URL != "https://downloads.immortalwrt.org/" {
+ 		t.Fatalf("unexpected url mapping: %#v", source)
+ 	}
+ }
+@@ -73,19 +73,19 @@
+ 	if len(list) != len(guideSoftSourceIdentities) {
+ 		t.Fatalf("unexpected source count: %d", len(list))
+ 	}
+-	if list[0].Identity != "OpenWrtHttp" || list[7].Identity != "Tencent Cloud" {
+-		t.Fatalf("unexpected list order: %#v %#v", list[0], list[7])
++	if list[0].Identity != "ZJU" || list[1].Identity != "ImmortalWrt" {
++		t.Fatalf("unexpected list order: %#v %#v", list[0], list[1])
+ 	}
+ }
+ 
+ func TestReadGuideSoftSourceFeedURLByContent(t *testing.T) {
+ 	t.Parallel()
+ 
+-	url, err := getOpkgDistFeedUrlByContent("src/gz istoreos_base https://mirrors.aliyun.com/openwrt/packages/base\n")
++	url, err := getOpkgDistFeedUrlByContent("src/gz istoreos_base https://downloads.immortalwrt.org/packages/base\n")
+ 	if err != nil {
+ 		t.Fatalf("unexpected parse error: %v", err)
+ 	}
+-	if url != "https://mirrors.aliyun.com/openwrt/" {
++	if url != "https://downloads.immortalwrt.org/" {
+ 		t.Fatalf("unexpected feed url: %q", url)
+ 	}
+ }
+@@ -99,11 +99,11 @@
+ 	}
+ }
+ 
+-func TestDefaultGuideSoftSourceReaderReadCurrentSourceMapsOpenWrtHost(t *testing.T) {
++func TestDefaultGuideSoftSourceReaderReadCurrentSourceMapsImmortalWrtHost(t *testing.T) {
+ 	prevRead := readGuideSoftSourceFile
+ 	defer func() { readGuideSoftSourceFile = prevRead }()
+ 	readGuideSoftSourceFile = func(path string) ([]byte, error) {
+-		return []byte("src/gz istoreos_base https://downloads.openwrt.org/packages/base\n"), nil
++		return []byte("src/gz istoreos_base https://downloads.immortalwrt.org/packages/base\n"), nil
+ 	}
+ 
+ 	reader := newDefaultGuideSoftSourceReader()
+@@ -111,7 +111,7 @@
+ 	if err != nil {
+ 		t.Fatalf("unexpected current-source error: %v", err)
+ 	}
+-	if source.Identity != "OpenWrtHttps" || source.URL != "https://downloads.openwrt.org/" {
++	if source.Identity != "ImmortalWrt" || source.URL != "https://downloads.immortalwrt.org/" {
+ 		t.Fatalf("unexpected current source: %#v", source)
+ 	}
+ }
+@@ -120,7 +120,7 @@
+ 	prevRead := readGuideSoftSourceFile
+ 	defer func() { readGuideSoftSourceFile = prevRead }()
+ 	readGuideSoftSourceFile = func(path string) ([]byte, error) {
+-		return []byte("src/gz istoreos_base https://mirrors.sustech.edu.cn/packages/base\n"), nil
++		return []byte("src/gz istoreos_base https://mirrors.zju.edu.cn/immortalwrt/packages/base\n"), nil
+ 	}
+ 
+ 	reader := newDefaultGuideSoftSourceReader()
+@@ -128,7 +128,7 @@
+ 	if err != nil {
+ 		t.Fatalf("unexpected current-source error: %v", err)
+ 	}
+-	if source.Identity != "SUSTech" || source.URL != "https://mirrors.sustech.edu.cn/openwrt/" {
++	if source.Identity != "ZJU" || source.URL != "https://mirrors.zju.edu.cn/immortalwrt/" {
+ 		t.Fatalf("unexpected mirror source: %#v", source)
+ 	}
+ }
+@@ -139,12 +139,12 @@
+ 	tempDir := t.TempDir()
+ 	sourceFile := filepath.Join(tempDir, "rom-distfeeds.conf")
+ 	targetFile := filepath.Join(tempDir, "distfeeds.conf")
+-	if err := os.WriteFile(targetFile, []byte("src/gz istoreos_base https://old.example.com/openwrt/packages/base\n"), 0600); err != nil {
++	if err := os.WriteFile(targetFile, []byte("https://mirrors.zju.edu.cn/immortalwrt/snapshots/packages/aarch64_cortex-a53/base/packages.adb\n"), 0600); err != nil {
+ 		t.Fatalf("unexpected target write error: %v", err)
+ 	}
+ 
+ 	writer := &defaultGuideSoftSourceWriter{sourcePath: sourceFile, targetPath: targetFile}
+-	err := writer.ReplaceSource(context.Background(), resolveGuideSoftSourceByIdentity("Alibaba Cloud"))
++	err := writer.ReplaceSource(context.Background(), resolveGuideSoftSourceByIdentity("ImmortalWrt"))
+ 	if err != nil {
+ 		t.Fatalf("unexpected replace error: %v", err)
+ 	}
+@@ -153,7 +153,7 @@
+ 	if err != nil {
+ 		t.Fatalf("unexpected target read error: %v", err)
+ 	}
+-	if !strings.Contains(string(content), "https://mirrors.aliyun.com/openwrt/") {
++	if !strings.Contains(string(content), "https://downloads.immortalwrt.org/") {
+ 		t.Fatalf("unexpected replaced content: %s", string(content))
+ 	}
+ 	fi, err := os.Stat(targetFile)
+--- a/backend/service/guide_soft_source_types.go
++++ b/backend/service/guide_soft_source_types.go
+@@ -3,36 +3,18 @@
+ import "github.com/istoreos/quickstart/backend/models"
+ 
+ var guideSoftSourceIdentities = []string{
+-	"OpenWrtHttp",
+-	"OpenWrtHttps",
+-	"CERNET",
+-	"SUSTech",
+-	"Tsinghua",
+-	"USTC",
+-	"Alibaba Cloud",
+-	"Tencent Cloud",
++	"ZJU",
++	"ImmortalWrt",
+ }
+ 
+ var guideSoftSourceNames = []string{
+-	"OpenWRT(HTTP)",
+-	"OpenWRT(HTTPS)",
+-	"高校联合镜像站（智能选择最近大学镜像站）",
+-	"南方科技大学",
+-	"清华大学",
+-	"中国科学技术大学",
+-	"阿里云",
+-	"腾讯云",
++	"浙江大学（ImmortalWrt snapshots）",
++	"ImmortalWrt 官方（snapshots）",
+ }
+ 
+ var guideSoftSourceURLs = []string{
+-	"http://downloads.openwrt.org/",
+-	"https://downloads.openwrt.org/",
+-	"https://mirrors.cernet.edu.cn/openwrt/",
+-	"https://mirrors.sustech.edu.cn/openwrt/",
+-	"https://mirrors.tuna.tsinghua.edu.cn/openwrt/",
+-	"https://mirrors.ustc.edu.cn/openwrt/",
+-	"https://mirrors.aliyun.com/openwrt/",
+-	"https://mirrors.cloud.tencent.com/openwrt/",
++	"https://mirrors.zju.edu.cn/immortalwrt/",
++	"https://downloads.immortalwrt.org/",
+ }
+ 
+ func buildGuideSoftSourceByIndex(identity string, index int) models.GuideSoftSourceInfo {
+--- a/backend/service/guide_soft_source_usecase_test.go
++++ b/backend/service/guide_soft_source_usecase_test.go
+@@ -62,7 +62,7 @@
+ 
+ 	service := GuideSoftSourceService{
+ 		reader: &fakeGuideSoftSourceReader{
+-			current: &models.GuideSoftSourceInfo{Identity: "USTC", Name: "中国科学技术大学", URL: "https://mirrors.ustc.edu.cn/openwrt/"},
++			current: &models.GuideSoftSourceInfo{Identity: "ZJU", Name: "中国科学技术大学", URL: "https://mirrors.ustc.edu.cn/openwrt/"},
+ 		},
+ 		writer: &fakeGuideSoftSourceWriter{},
+ 	}
+@@ -71,7 +71,7 @@
+ 	if err != nil {
+ 		t.Fatalf("unexpected get error: %v", err)
+ 	}
+-	if resp == nil || resp.SoftSource == nil || resp.SoftSource.Identity != "USTC" {
++	if resp == nil || resp.SoftSource == nil || resp.SoftSource.Identity != "ZJU" {
+ 		t.Fatalf("unexpected get response: %#v", resp)
+ 	}
+ }
+@@ -97,7 +97,7 @@
+ 		writer: &fakeGuideSoftSourceWriter{err: errors.New("replace failed")},
+ 	}
+ 
+-	if _, err := service.Set(context.Background(), GuideSoftSourceInput{SoftSourceIdentity: "USTC"}); err == nil || err.Error() != "修改软件源失败" {
++	if _, err := service.Set(context.Background(), GuideSoftSourceInput{SoftSourceIdentity: "ZJU"}); err == nil || err.Error() != "修改软件源失败" {
+ 		t.Fatalf("unexpected replace error: %v", err)
+ 	}
+ }
+@@ -106,7 +106,7 @@
+ 	t.Parallel()
+ 
+ 	reader := &fakeGuideSoftSourceReader{
+-		current: &models.GuideSoftSourceInfo{Identity: "Alibaba Cloud", Name: "阿里云", URL: "https://mirrors.aliyun.com/openwrt/"},
++		current: &models.GuideSoftSourceInfo{Identity: "ImmortalWrt", Name: "阿里云", URL: "https://mirrors.aliyun.com/openwrt/"},
+ 	}
+ 	writer := &fakeGuideSoftSourceWriter{}
+ 	service := GuideSoftSourceService{
+@@ -114,14 +114,14 @@
+ 		writer: writer,
+ 	}
+ 
+-	resp, err := service.Set(context.Background(), GuideSoftSourceInput{SoftSourceIdentity: "Alibaba Cloud"})
++	resp, err := service.Set(context.Background(), GuideSoftSourceInput{SoftSourceIdentity: "ImmortalWrt"})
+ 	if err != nil {
+ 		t.Fatalf("unexpected set error: %v", err)
+ 	}
+-	if writer.replaced == nil || writer.replaced.Identity != "Alibaba Cloud" {
++	if writer.replaced == nil || writer.replaced.Identity != "ImmortalWrt" {
+ 		t.Fatalf("unexpected replaced source: %#v", writer.replaced)
+ 	}
+-	if resp == nil || resp.SoftSource == nil || resp.SoftSource.Identity != "Alibaba Cloud" {
++	if resp == nil || resp.SoftSource == nil || resp.SoftSource.Identity != "ImmortalWrt" {
+ 		t.Fatalf("unexpected set response: %#v", resp)
+ 	}
+ }
+@@ -152,7 +152,7 @@
+ 	prev := guideSoftSourceGet
+ 	defer func() { guideSoftSourceGet = prev }()
+ 
+-	expectedSource := &models.GuideSoftSourceInfo{Identity: "USTC", Name: "中国科学技术大学", URL: "https://mirrors.ustc.edu.cn/openwrt/"}
++	expectedSource := &models.GuideSoftSourceInfo{Identity: "ZJU", Name: "中国科学技术大学", URL: "https://mirrors.ustc.edu.cn/openwrt/"}
+ 	guideSoftSourceGet = func(ctx context.Context) (*models.GuideSoftSourceResponseResult, error) {
+ 		return &models.GuideSoftSourceResponseResult{SoftSource: expectedSource}, nil
+ 	}
+@@ -161,7 +161,7 @@
+ 	if err != nil {
+ 		t.Fatalf("unexpected get wrapper error: %v", err)
+ 	}
+-	if resp == nil || resp.Result == nil || resp.Result.SoftSource == nil || resp.Result.SoftSource.Identity != "USTC" {
++	if resp == nil || resp.Result == nil || resp.Result.SoftSource == nil || resp.Result.SoftSource.Identity != "ZJU" {
+ 		t.Fatalf("unexpected get wrapper response: %#v", resp)
+ 	}
+ }
+@@ -170,14 +170,14 @@
+ 	prev := guideSoftSourceSet
+ 	defer func() { guideSoftSourceSet = prev }()
+ 
+-	expectedSource := &models.GuideSoftSourceInfo{Identity: "Alibaba Cloud", Name: "阿里云", URL: "https://mirrors.aliyun.com/openwrt/"}
++	expectedSource := &models.GuideSoftSourceInfo{Identity: "ImmortalWrt", Name: "阿里云", URL: "https://mirrors.aliyun.com/openwrt/"}
+ 	var captured GuideSoftSourceInput
+ 	guideSoftSourceSet = func(ctx context.Context, input GuideSoftSourceInput) (*models.GuideSoftSourceResponseResult, error) {
+ 		captured = input
+ 		return &models.GuideSoftSourceResponseResult{SoftSource: expectedSource}, nil
+ 	}
+ 
+-	req, err := http.NewRequest(http.MethodPost, "/guide/soft-source", strings.NewReader(`{"softSourceIdentity":"Alibaba Cloud"}`))
++	req, err := http.NewRequest(http.MethodPost, "/guide/soft-source", strings.NewReader(`{"softSourceIdentity":"ImmortalWrt"}`))
+ 	if err != nil {
+ 		t.Fatalf("unexpected request build error: %v", err)
+ 	}
+@@ -185,10 +185,10 @@
+ 	if err != nil {
+ 		t.Fatalf("unexpected post wrapper error: %v", err)
+ 	}
+-	if captured.SoftSourceIdentity != "Alibaba Cloud" {
++	if captured.SoftSourceIdentity != "ImmortalWrt" {
+ 		t.Fatalf("unexpected post wrapper input: %#v", captured)
+ 	}
+-	if resp == nil || resp.Result == nil || resp.Result.SoftSource == nil || resp.Result.SoftSource.Identity != "Alibaba Cloud" {
++	if resp == nil || resp.Result == nil || resp.Result.SoftSource == nil || resp.Result.SoftSource.Identity != "ImmortalWrt" {
+ 		t.Fatalf("unexpected post wrapper response: %#v", resp)
+ 	}
+ }
+--- a/backend/service/network-online.go
++++ b/backend/service/network-online.go
+@@ -8,6 +8,7 @@
+ 	"io/ioutil"
+ 	"net"
+ 	"net/http"
++	"net/url"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -127,11 +128,24 @@
+ 	if err != nil {
+ 		return "", err
+ 	}
+-	found := matchStringOnce(string(buf), `(?m)^(https?:\/\/.*\/base\/packages\.adb)$`)
+-	if found == nil {
+-		return "", errors.New("apk feed not found")
+-	}
+-	return found[1] + ".asc", nil
++	return apkFeedProbeURL(string(buf))
++}
++
++func apkFeedProbeURL(content string) (string, error) {
++	for _, line := range strings.Split(content, "\n") {
++		line = strings.TrimSpace(line)
++		if strings.HasPrefix(line, "#") || !strings.HasSuffix(line, "/base/packages.adb") {
++			continue
++		}
++		parsed, err := url.Parse(line)
++		if err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") &&
++			parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" &&
++			parsed.Fragment == "" && !strings.ContainsAny(line, "'\"\\ \t\r\n") {
++			// APK v3 signatures are embedded in the ADB, not in a sidecar .asc.
++			return line, nil
++		}
++	}
++	return "", errors.New("apk feed not found")
+ }
+ 
+ func getOpkgDistFeedUrlForCheck() (string, error) {

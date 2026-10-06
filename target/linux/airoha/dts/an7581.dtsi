@@ -307,7 +307,7 @@
 			polling-delay-passive = <0>;
 			polling-delay = <0>;
 
-			thermal-sensors = <&thermal 0>;
+			thermal-sensors = <&thermal>;
 
 			trips {
 				cpu_hot: cpu-hot {

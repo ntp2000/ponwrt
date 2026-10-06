@@ -1,0 +1,35 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Keep the complete recovery root compressed, with a temporary writable layer.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export INITRAMFS=1
+
+fail() {
+	echo "HG5585F RAM recovery: $*" >&2
+	echo "Recovery setup failed; starting a console for diagnosis." >&2
+	while :; do
+		/bin/sh </dev/console >/dev/console 2>&1
+		sleep 1
+	done
+}
+
+mount -t proc proc /proc || fail "cannot mount proc"
+echo "HG5585F RAM recovery: mounting compressed rootfs"
+# The backing store holds one squashfs image and the writable overlay. The
+# expanded root is never copied. Keep it on a normal mount for switch_root
+# and procd's mount namespaces (initial rootfs itself cannot be pivoted).
+mount -t tmpfs -o mode=0755,size=50% recovery /backing || fail "cannot mount backing store"
+mv /root.squashfs /backing/root.squashfs || fail "cannot move compressed rootfs"
+mkdir -p /backing/rom /backing/upper /backing/work || fail "cannot prepare overlay"
+mount -t squashfs -o ro,loop /backing/root.squashfs /backing/rom || fail "cannot mount squashfs"
+mount -t overlay -o lowerdir=/backing/rom,upperdir=/backing/upper,workdir=/backing/work \
+	overlay /new_root || fail "cannot mount overlay"
+mkdir -p /new_root/rom /new_root/overlay /new_root/proc || fail "cannot prepare root mounts"
+mount --move /backing/rom /new_root/rom || fail "cannot move squashfs mount"
+mount --move /backing /new_root/overlay || fail "cannot move backing mount"
+mount --move /proc /new_root/proc || fail "cannot move proc mount"
+# fstools block automount uses this marker to keep the installed NAND overlay unmounted.
+echo 1 > /new_root/etc/hg5585f-ramboot || fail "cannot mark RAM recovery"
+[ -x /new_root/sbin/init ] || fail "rootfs has no executable /sbin/init"
+echo "HG5585F RAM recovery: starting procd with compressed root and RAM overlay"
+exec switch_root /new_root /sbin/init

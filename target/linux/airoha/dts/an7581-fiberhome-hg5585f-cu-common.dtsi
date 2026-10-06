@@ -6,6 +6,8 @@
 /* The CU variant maps its four panel ports to internal PHY1 through PHY4. */
 &gsw_port1 {
 	label = "lan1";
+	nvmem-cell-names = "mac-address";
+	nvmem-cells = <&fiberhome_base_mac 0x21>;
 	status = "okay";
 };
 

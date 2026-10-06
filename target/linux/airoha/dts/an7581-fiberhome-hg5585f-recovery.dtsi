@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+
+/*
+ * Recovery unpacks a small external bootstrap and the compressed squashfs
+ * into ramfs, then mounts squashfs with a writable tmpfs overlay. Never
+ * unpack or copy the complete expanded package tree during RAM boot.
+ * Recovery keeps the complete Kite packet/BA reservations so the same RAM
+ * candidate can exercise the first data-lifecycle round. npu_enable remains
+ * a module-load choice; ordinary host Wi-Fi is still safe when it is off.
+ */
+/ {
+	chosen {
+		/* The root comes from this RAM FIT, not the installed NAND FIT. */
+		/delete-property/ rootdisk;
+		bootargs-append = " ubi.fm_autoconvert=1 rootfstype=ramfs";
+	};
+
+};
+
+&npu {
+	memory-region = <&npu_binary>, <&npu_kite_pkt>, <&npu_kite_ba>;
+	memory-region-names = "binary", "pkt", "ba";
+};

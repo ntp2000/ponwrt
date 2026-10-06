@@ -121,7 +121,7 @@
 
 &gdm1 {
 	/* The switch CPU port uses the board base MAC address. */
-	nvmem-cells = <&fiberhome_base_mac>;
+	nvmem-cells = <&fiberhome_base_mac 0>;
 	nvmem-cell-names = "mac-address";
 	status = "okay";
 };
@@ -152,7 +152,7 @@
 
 &gdm4 {
 	/* The external 2.5G port and switch CPU port share the factory base MAC. */
-	nvmem-cells = <&fiberhome_base_mac>;
+	nvmem-cells = <&fiberhome_base_mac 0>;
 	nvmem-cell-names = "mac-address";
 	status = "okay";
 	phy-handle = <&gpy211>;
@@ -222,7 +222,7 @@
 
 &gdm2 {
 	/* XG-PON activation and service GEM state drive pon0 carrier. */
-	nvmem-cells = <&fiberhome_base_mac>;
+	nvmem-cells = <&fiberhome_base_mac 0>;
 	nvmem-cell-names = "mac-address";
 	airoha,pon-data-path;
 	status = "okay";

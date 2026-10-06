@@ -20,8 +20,9 @@
 };
 
 &gdm4 {
-	nvmem-cells = <&fiberhome_base_mac>;
+	nvmem-cells = <&fiberhome_base_mac 0x21>;
 	nvmem-cell-names = "mac-address";
+	airoha,mac-from-nvmem;
 	status = "okay";
 	phy-handle = <&gpy211>;
 	phy-mode = "2500base-x";

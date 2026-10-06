@@ -1,0 +1,337 @@
+--- a/web/src/components/action-softwaresource/index.vue
++++ b/web/src/components/action-softwaresource/index.vue
+@@ -98,7 +98,7 @@
+                     softwareSourceValue.value = result.softSource.identity
+                 }
+             }
+-        })
++        }).catch(error => Toast.Error(error))
+ }
+ getData()
+ 
+--- a/web/src/pages/index/network/NetworkConnection.vue
++++ b/web/src/pages/index/network/NetworkConnection.vue
+@@ -146,10 +146,9 @@
+ 
+ import ActionDNS from "/@/components/action-dns"
+ import ActionSoftwareSource from "/@/components/action-softwaresource"
+-import { reactive, computed, ref, onUnmounted, watch } from 'vue';
++import { computed, ref, onUnmounted, watch } from 'vue';
+ import { useNetworkStore } from '/@/plugins/store'
+ import utils from '/@/utils'
+-import request from '/@/request';
+ import { useGettext } from '/@/plugins/i18n'
+ import { useRouter } from 'vue-router'
+ const { $gettext } = useGettext()
+@@ -203,7 +202,7 @@
+ 
+ const info = computed(() => {
+     // networkStore.status.networkInfo = 'dnsFailed'
+-    return networkStore.status
++    return networkStore.displayStatus
+ })
+ 
+ const onDNS = () => {
+@@ -214,14 +213,6 @@
+ }
+ 
+ const deviceList = computed(() => networkStore.deviceList)
+-
+-const porter = reactive<{
+-    portList: NetworkPort[],
+-    load: boolean
+-}>({
+-    portList: [],
+-    load: false
+-})
+ 
+ const getProto = (proto: string) => {
+     switch (proto) {
+@@ -246,20 +237,6 @@
+     }
+ }
+ 
+-const getPortList = () => {
+-    (porter.load && document.hidden ? Promise.resolve() : request.Network.PortList.GET().then(res => {
+-        if (res?.data) {
+-            const { result } = res?.data
+-            if (result) {
+-                porter.portList = result.ports || []
+-            }
+-        }
+-    })).finally(() => {
+-        porter.load = true
+-        setTimeout(getPortList, 10000)
+-    })
+-}
+-getPortList()
+ const stampForm = utils.stampForm
+ 
+ const goDeviceManagement = () => {
+--- a/web/src/pages/index/network/NetworkInterface.vue
++++ b/web/src/pages/index/network/NetworkInterface.vue
+@@ -58,23 +58,20 @@
+ import settingIcon from "/@/components/svg/setting.vue"
+ import moreItem from "/@/components/svg/more.vue"
+ 
+-import { reactive, ref, watch } from 'vue';
+-import request from '/@/request';
++import { computed, ref, watch } from 'vue';
+ import Toast from '/@/components/toast';
+-import { useAppStore } from '/@/plugins/store';
++import { useAppStore, useNetworkStore } from '/@/plugins/store';
+ import { useGettext } from '/@/plugins/i18n'
+ const { $gettext } = useGettext()
+ import { useRouter } from 'vue-router'
+ const router = useRouter()
+ const isSettingsMenuOpen = ref(false)
+ const appStore = useAppStore()
+-const porter = reactive<{
+-    portList: NetworkPort[],
+-    load: boolean
+-}>({
+-    portList: [],
+-    load: false
+-})
++const networkStore = useNetworkStore()
++const porter = computed(() => ({
++    portList: networkStore.portList,
++    load: networkStore.portListUpdatedAt !== null
++}))
+ 
+ const goTo = () => {
+     router.push('/interfaceconfig')
+@@ -101,36 +98,10 @@
+ const STORAGE_KEY = "checkedPorts"
+ // 初始默认至少勾选一个，从本地读取
+ const checkedList = ref<string[]>(loadChecked(STORAGE_KEY))
+-const portList = ref<NetworkPort[]>([])
+-const getPortList = () => {
+-    (porter.load && document.hidden ? Promise.resolve() : request.Network.PortList.GET().then(res => {
+-        if (res?.data) {
+-            const { result } = res?.data
+-            if (result) {
+-                porter.portList = result.ports || []
+-                portList.value = result.ports || []
+-
+-                // 如果本地存储为空，默认勾选全部
+-                // if (checkedList.value.length === 0) {
+-                //     porter.portList.forEach(item => {
+-                //         checkedList.value.push(item.name)
+-                //     })
+-                //     saveChecked(STORAGE_KEY, checkedList.value)
+-                //     portList.value = result.ports || []
+-                // } else {
+-                //     portList.value = porter.portList.filter(item => checkedList.value.includes(item.name))
+-                // }
+-            }
+-        }
+-    })).finally(() => {
+-        porter.load = true
+-        setTimeout(getPortList, 10000)
+-    })
+-}
+-getPortList()
++const portList = computed(() => porter.value.portList.filter(
++    item => checkedList.value.length === 0 || checkedList.value.includes(item.name)))
+ 
+ watch(checkedList, (newVal) => {
+-    portList.value = porter.portList.filter(item => newVal.includes(item.name))
+     console.log(newVal, 'newVal');
+     saveChecked(STORAGE_KEY, newVal)
+ })
+--- a/web/src/plugins/store/index.ts
++++ b/web/src/plugins/store/index.ts
+@@ -1,6 +1,7 @@
+ import { createPinia, defineStore } from 'pinia'
+ import request from '/@/request'
+-import { FakerNetworkStatusResponse } from "/@/faker"
++import { networkState, updateNetwork, networkFailure, updatePorts, tickNetwork,
++    displayNetwork, networkPollDelay } from '/@/utils/network-state'
+ export const useAppStore = defineStore("app", {
+     state: () => {
+         return {
+@@ -35,15 +36,23 @@
+ export const useNetworkStore = defineStore("network", {
+     state: () => {
+         return {
+-            status: <NetworkStatus>{},
++            ...networkState(),
+             deviceList: <NetworkDeviceList>{},
+         }
+     },
+     getters: {
++        displayStatus: state => displayNetwork(state),
++        pollDelay: state => networkPollDelay(state),
+     },
+     actions: {
+-        updateNetworkStatus(networkStatus: NetworkStatus) {
+-            this.status = networkStatus
++        updateNetworkStatus(networkStatus: unknown) {
++            updateNetwork(this, networkStatus, Date.now())
++        },
++        handleNetworkRequestFailure() {
++            networkFailure(this, Date.now())
++        },
++        updatePortList(ports: unknown) {
++            updatePorts(this, ports, Date.now())
+         },
+         requestDeviceList() {
+             request.Network.Device.List.GET().then(res => {
+@@ -56,6 +65,7 @@
+             })
+         },
+         incrTime() {
++            tickNetwork(this, Date.now())
+             if (this.status.uptimeStamp) {
+                 this.status.uptimeStamp++
+             }
+@@ -130,14 +140,11 @@
+     }
+     const requestNetworkStatus = function() {
+         return (!networkStatusInit && document.hidden ? Promise.resolve() : request.Network.Status.GET().then(res => {
+-            if (res?.data) {
+-                const { result } = res?.data
+-                if (result) {
+-                    network.updateNetworkStatus(result)
+-                }
+-            }
+-        })).finally(()=>{
+-            setTimeout(requestNetworkStatus, 5000)
++            network.updateNetworkStatus(res?.data?.result)
++        })).catch(() => {
++            network.handleNetworkRequestFailure()
++        }).finally(()=>{
++            setTimeout(requestNetworkStatus, network.pollDelay)
+             if (networkStatusInit) {
+                 setInterval(() => {
+                     network.incrTime()
+@@ -146,6 +153,18 @@
+             }
+         })
+     }
++    let portsInit = true
++    const requestPorts = () => {
++        return (!portsInit && document.hidden ? Promise.resolve() : request.Network.PortList.GET().then(res => {
++            network.updatePortList(res?.data?.result?.ports)
++        })).catch(() => {
++            // Retain the last sample; its six-second freshness bound still applies.
++        }).finally(() => {
++            portsInit = false
++            setTimeout(requestPorts, 2000)
++        })
++    }
++    requestPorts()
+     // network
+     requestNetworkStatus()
+     network.requestDeviceList()
+--- /dev/null
++++ b/web/src/utils/network-state.ts
+@@ -0,0 +1,107 @@
++import { linkStatus } from './link-state';
++
++export const DETECT_TIMEOUT = 30000;
++export const PORT_FRESHNESS = 6000;
++const terminal = new Set(['netSuccess', 'netFailed', 'dnsFailed', 'softSourceFailed']);
++
++export function networkState() {
++    return {
++        status: {} as NetworkStatus,
++        lastTerminalNetworkStatus: null as NetworkStatus | null,
++        networkDetectingSince: null as number | null,
++        awaitingWanRecovery: false,
++        wanLinkDown: false,
++        portList: [] as NetworkPort[],
++        portListUpdatedAt: null as number | null,
++        clock: 0,
++    };
++}
++type State = ReturnType<typeof networkState>;
++
++function startDetecting(state: State, now: number) {
++    if (state.networkDetectingSince === null) state.networkDetectingSince = now;
++}
++
++export function updateNetwork(state: State, value: unknown, now: number) {
++    state.clock = now;
++    if (!value || typeof value !== 'object' || Array.isArray(value)
++        || typeof (value as NetworkStatus).networkInfo !== 'string') {
++        networkFailure(state, now);
++        return;
++    }
++    const status = value as NetworkStatus;
++    state.status = { ...status };
++    if (terminal.has(status.networkInfo!)) {
++        // A physical-down override must never become a backend terminal result.
++        if (!state.wanLinkDown) {
++            state.lastTerminalNetworkStatus = { ...status };
++            state.networkDetectingSince = null;
++            state.awaitingWanRecovery = false;
++        }
++    } else {
++        startDetecting(state, now);
++    }
++    updateWan(state, now);
++}
++
++export function networkFailure(state: State, now: number) {
++    state.clock = now;
++    startDetecting(state, now);
++    state.status = { ...state.status, networkInfo: 'netDetecting' };
++}
++
++function updateWan(state: State, now: number) {
++    const iface = state.status.defaultInterface || state.lastTerminalNetworkStatus?.defaultInterface;
++    const fresh = state.portListUpdatedAt !== null && now - state.portListUpdatedAt < PORT_FRESHNESS;
++    const matching = fresh && iface ? state.portList.filter(port =>
++        port.name === iface || port.master === iface
++        || (Array.isArray(port.interfaceNames) && port.interfaceNames.includes(iface))) : [];
++    const down = matching.length > 0 && matching.every(port => linkStatus(port.linkState) === 'disconnected');
++    const recovered = matching.some(port => linkStatus(port.linkState) === 'connected');
++    if (state.wanLinkDown && recovered) {
++        state.awaitingWanRecovery = true;
++        state.networkDetectingSince = now;
++        state.status = { ...state.status, networkInfo: 'netDetecting' };
++    }
++    // Expired/unknown samples do not count as proof of link recovery.
++    if (state.wanLinkDown && !down && !recovered) {
++        state.awaitingWanRecovery = true;
++        startDetecting(state, now);
++    }
++    state.wanLinkDown = down;
++}
++
++export function updatePorts(state: State, ports: unknown, now: number) {
++    state.clock = now;
++    if (!Array.isArray(ports) || !ports.every(p => p && typeof p === 'object'
++        && typeof p.name === 'string')) return;
++    state.portList = ports;
++    state.portListUpdatedAt = now;
++    updateWan(state, now);
++}
++
++export function tickNetwork(state: State, now: number) {
++    state.clock = now;
++    updateWan(state, now);
++}
++
++export function displayNetwork(state: State): NetworkStatus {
++    const pending = state.networkDetectingSince !== null;
++    const timedOut = pending && state.clock - state.networkDetectingSince! >= DETECT_TIMEOUT;
++    let info = state.status.networkInfo;
++    if (state.wanLinkDown) info = 'netFailed';
++    else if (state.awaitingWanRecovery) info = timedOut ? 'netFailed' : 'netDetecting';
++    else if (pending || !terminal.has(info || '')) {
++        const last = state.lastTerminalNetworkStatus?.networkInfo;
++        info = last && (last !== 'netSuccess' || !timedOut)
++            ? last : timedOut ? 'netFailed' : 'netDetecting';
++    }
++    const previous = pending || state.wanLinkDown || state.awaitingWanRecovery
++        ? state.lastTerminalNetworkStatus : null;
++    return { ...previous, ...state.status, networkInfo: info, internetConnected: info === 'netSuccess' };
++}
++
++export function networkPollDelay(state: State): number {
++    return state.networkDetectingSince !== null
++        && state.clock - state.networkDetectingSince < DETECT_TIMEOUT ? 1000 : 5000;
++}

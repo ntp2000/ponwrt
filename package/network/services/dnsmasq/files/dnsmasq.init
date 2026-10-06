@@ -108,14 +108,20 @@ dhcp_calc() {
 dhcp_check() {
 	local ifname="$1"
 	local stamp="${BASEDHCPSTAMPFILE_CFG}.${ifname}.dhcp"
-	local rv=0
+	local rv=0 cached
 
-	[ -s "$stamp" ] && return $(cat "$stamp")
+	# A successful no-server probe is cached so a reload does not discover
+	# our own server. A positive foreign-server result must be rechecked:
+	# it may have been seen during a temporary bridge/topology transition.
+	# Old one-byte stamps are compatible; never treat arbitrary contents
+	# as a shell return code.
+	[ ! -s "$stamp" ] || read -r cached < "$stamp"
+	[ "$cached" != 0 ] || return 0
 
 	# If interface is down, skip it.
 	# The init script will be called again once the link is up
 	case "$(devstatus "$ifname" | jsonfilter -e @.up)" in
-		false) return 1;;
+		false) return 2;;
 	esac
 
 	udhcpc -n -q -s /bin/true -t 1 -i "$ifname" >&- && rv=1 || rv=0
@@ -243,6 +249,8 @@ filter_dnsmasq() {
 	config_get found_cfg "$cfg" "instance"
 	if [ -z "$found_cfg" ] || [ "$found_cfg" = "$match_cfg" ]; then
 		$func $cfg
+	elif [ "$func" = dhcp_add ]; then
+		dhcp_pool_note "$cfg" - other-instance
 	fi
 }
 
@@ -520,35 +528,43 @@ dhcp_boot_add() {
 	dhcp_option_add "$cfg" "$networkid" "$force"
 }
 
+# Saved in the generated config so reasons survive the syslog ring buffer.
+# Values are UCI section/interface identifiers or fixed tokens, never keys.
+dhcp_pool_note() {
+	printf '# dhcp-pool section=%s interface=%s state=%s\n' "$1" "$2" "$3" >> "$CONFIGFILE_TMP"
+}
+
 dhcp_add() {
 	local cfg="$1"
 	local dhcp6range="::"
 	local nettag
 	local tags
+	local probe_result
 
 	config_get net "$cfg" interface
-	[ -n "$net" ] || return 0
+	[ -n "$net" ] || { dhcp_pool_note "$cfg" - missing-interface; return 0; }
 
 	config_get networkid "$cfg" networkid
 	[ -n "$networkid" ] || networkid="$net"
 
-	network_get_device ifname "$net" || return 0
+	network_get_device ifname "$net" || { dhcp_pool_note "$cfg" "$net" device-unavailable; return 0; }
 
 	[ "$cachelocal" = "0" ] && network_get_dnsserver dnsserver "$net" && {
 		DNS_SERVERS="$DNS_SERVERS $dnsserver"
 	}
 
 	append_bool "$cfg" ignore "--no-dhcp-interface=$ifname" && {
+		dhcp_pool_note "$cfg" "$ifname" ignored
 		# Many ISP do not have useful names for DHCP customers (your WAN).
 		dhcp_this_host_add "$net" "$ifname" "$ADD_WAN_FQDN"
 		return 0
 	}
 
-	network_get_subnet subnet "$net" || return 0
-	network_get_protocol proto "$net" || return 0
+	network_get_subnet subnet "$net" || { dhcp_pool_note "$cfg" "$ifname" subnet-unavailable; return 0; }
+	network_get_protocol proto "$net" || { dhcp_pool_note "$cfg" "$ifname" protocol-unavailable; return 0; }
 
 	# Do not support non-static interfaces for now
-	[ static = "$proto" ] || return 0
+	[ static = "$proto" ] || { dhcp_pool_note "$cfg" "$ifname" non-static; return 0; }
 
 	ipaddr="${subnet%%/*}"
 	prefix_or_netmask="${subnet##*/}"
@@ -560,12 +576,21 @@ dhcp_add() {
 
 	#check for an already active dhcp server on the interface, unless 'force' is set
 	config_get_bool force "$cfg" force 0
-	[ $force -gt 0 ] || dhcp_check "$ifname" || {
-		logger -t dnsmasq \
-			"found already running DHCP-server on interface '$ifname'" \
-			"refusing to start, use 'option force 1' to override"
-		return 0
-	}
+	if [ "$force" -eq 0 ]; then
+		dhcp_check "$ifname"
+		probe_result=$?
+		case "$probe_result" in
+		0) ;;
+		2)
+			dhcp_pool_note "$cfg" "$ifname" link-down
+			logger -t dnsmasq "DHCP pool '$cfg' deferred: interface '$ifname' is down"
+			return 0 ;;
+		*)
+			dhcp_pool_note "$cfg" "$ifname" foreign-server
+			logger -t dnsmasq "DHCP pool '$cfg' withheld: another DHCP server answered on '$ifname'; rechecked on next reload"
+			return 0 ;;
+		esac
+	fi
 
 	config_get start "$cfg" start 100
 	config_get limit "$cfg" limit 150
@@ -606,13 +631,17 @@ dhcp_add() {
 		ipcalc "$ipaddr/$prefix_or_netmask" "$start" "$limit"
 
 		if [ -z "$START" ] || [ -z "$END" ] || [ -z "$NETMASK" ]; then
+			dhcp_pool_note "$cfg" "$ifname" invalid-range
 			logger -t dnsmasq \
 				"unable to set dhcp-range for dhcp uci config section '$cfg'" \
 				"on interface '$ifname', please check your config"
 		else
 			[ "$dynamicdhcpv4" = "0" ] && END="static"
 			xappend "--dhcp-range=$tags$nettag$START,$END,$NETMASK,$leasetime${options:+ $options}"
+			dhcp_pool_note "$cfg" "$ifname" ready
 		fi
+	else
+		dhcp_pool_note "$cfg" "$ifname" dhcpv4-disabled
 	fi
 
 	if [ "$dynamicdhcpv6" = "0" ] ; then
@@ -1224,6 +1253,7 @@ dnsmasq_start()
 		[ -r "$RFC6761FILE" ] && xappend "--conf-file=$RFC6761FILE"
 	}
 
+	printf '# dhcp-owner version=%s boot=%s\n' "$DNSMASQ_DHCP_VER" "${BOOT:-0}" >> "$CONFIGFILE_TMP"
 	if [ "$DNSMASQ_DHCP_VER" -gt 4 ] ; then
 		# Enable RA feature for when/if it is constructed,
 		# and RA is selected per interface pool (RA, DHCP, or both),

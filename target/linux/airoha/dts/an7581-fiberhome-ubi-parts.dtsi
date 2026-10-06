@@ -106,6 +106,21 @@
 		fiberhome_base_mac: mac-address@2000 {
 			compatible = "mac-base";
 			reg = <0x2000 0x0006>;
+			#nvmem-cell-cells = <1>;
+		};
+
+		/* W0 is the base for the HG5585F Wi-Fi and switch-port MACs. */
+		fiberhome_wifi_mac: mac-address@1004 {
+			compatible = "mac-base";
+			reg = <0x1004 0x0006>;
+			#nvmem-cell-cells = <1>;
+		};
+
+		/* W1 is stored independently and must not be recalculated from W0. */
+		fiberhome_wifi_mac_1: mac-address@100a {
+			compatible = "mac-base";
+			reg = <0x100a 0x0006>;
+			#nvmem-cell-cells = <1>;
 		};
 
 		/* Decode the 16 hexadecimal GponSN characters into an 8-byte ONU SN. */

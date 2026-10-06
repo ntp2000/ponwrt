@@ -1,0 +1,20 @@
+Subject: firewall4: resolve bridge member ports for software flowtables
+
+--- a/root/usr/share/ucode/fw4.uc
++++ b/root/usr/share/ucode/fw4.uc
+@@ -611,9 +611,12 @@
+ 			if (fs.access(`/sys/class/net/${dev}/brport`))
+ 				push(bridge_devs, dev);
+ 			else if (fs.access(`/sys/class/net/${dev}/bridge`))
+-				push(bridge_devs, dev);
+-
+-		return bridge_devs;
++				for (let member in fs.glob(`/sys/class/net/${dev}/brif/*`))
++					push(bridge_devs, fs.basename(member));
++
++		// Bridge flow initialization tests ingress/egress member devices.
++		// The bridge master itself never satisfies these membership checks.
++		return sort(uniq(bridge_devs));
+ 	},
+ 
+ 	read_state: function() {

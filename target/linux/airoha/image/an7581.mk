@@ -194,6 +194,22 @@ define Device/fiberhome_hg5382a
 endef
 TARGET_DEVICES += fiberhome_hg5382a
 
+# An external bootstrap carries the complete native squashfs. Do not embed
+# the expanded per-device rootfs in the kernel: its boot-time copies exceed
+# the 512 MiB HG5585F memory budget before procd can start.
+define Build/hg5585f-ramboot
+	$(TOPDIR)/scripts/mkairoha-ramboot.sh \
+		$(if $(TARGET_PER_DEVICE_ROOTFS),$(KDIR)/target-dir-$(ROOTFS_ID/$(DEVICE_NAME)),$(TARGET_DIR)) \
+		$(IMAGE_ROOTFS) $(CURDIR)/hg5585f-ramboot-init \
+		$(LINUX_DIR)/usr/gen_init_cpio $(SOURCE_DATE_EPOCH) $@.cpio
+	$(TOPDIR)/scripts/mkits.sh -D $(DEVICE_NAME) -o $@.its \
+		-k $@ -C gzip -d $(KDIR)/image-$(lastword $(DEVICE_DTS)).dtb \
+		-i $@.cpio -a $(KERNEL_LOADADDR) -e $(KERNEL_LOADADDR) \
+		-c config-1 -A arm64 -v $(LINUX_VERSION)
+	PATH=$(LINUX_DIR)/scripts/dtc:$(PATH) mkimage -f $@.its $@.new
+	mv $@.new $@
+endef
+
 # HG5585F variants share parallel NAND, PON, MT7916D, and dual USB.
 define Device/fiberhome_hg5585f-common
   $(call Device/FitImageLzma)
@@ -210,16 +226,20 @@ define Device/fiberhome_hg5585f-common
   # PON and MT7916D read per-device calibration from factory UBI NVMEM cells.
   DEVICE_PACKAGES := kmod-gpio-button-hotplug kmod-leds-gpio kmod-usb3 \
     kmod-airoha-paged-bosa kmod-airoha-xpon airoha-ponctl airoha-pond \
-	 kmod-mt7915e kmod-mt7916-firmware wpad-openssl \
+	 kmod-mt7915e kmod-mt7916-firmware airoha-en7581-clanker-mt7916-npu \
+	 wpad-openssl \
 	 fitblk nand-utils ubi-utils $(AIROHA_USB_STORAGE_PACKAGES)
 endef
 
-# Expand FIT rules after DEVICE_DTS so each variant embeds its own DTB.
+# DEVICE_DTS lists the normal DT first and the RAM recovery DT last.
+# Expand FIT rules after DEVICE_DTS so each image uses its own boot policy.
 define Device/fiberhome_hg5585f-images
-  KERNEL_INITRAMFS := kernel-bin | lzma | \
-	fit lzma $$(KDIR)/image-$$(DEVICE_DTS).dtb with-initrd | pad-to 128k
+  KERNEL_DEPENDS += $(TOPDIR)/scripts/mkairoha-ramboot.sh $(CURDIR)/hg5585f-ramboot-init
+  KERNEL_INITRAMFS :=
+  IMAGES += $(if $(CONFIG_TARGET_ROOTFS_INITRAMFS),$(if $(IB),,recovery.itb))
+  IMAGE/recovery.itb := append-kernel | hg5585f-ramboot | pad-to 128k
   IMAGE/sysupgrade.itb := append-kernel | \
-	fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb external-static-with-rootfs | \
+	fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | \
 	append-metadata
 endef
 
@@ -227,7 +247,7 @@ define Device/fiberhome_hg5585f-ct
   $(call Device/fiberhome_hg5585f-common)
   DEVICE_MODEL := HG5585F
   DEVICE_VARIANT := CT
-  DEVICE_DTS := an7581-fiberhome-hg5585f-ct
+  DEVICE_DTS := an7581-fiberhome-hg5585f-ct an7581-fiberhome-hg5585f-ct-recovery
   DEVICE_PACKAGES += kmod-phy-maxlinear
   SUPPORTED_DEVICES += fiberhome,hg5585f-ct-usb-sfp
   $(call Device/fiberhome_hg5585f-images)
@@ -238,7 +258,7 @@ define Device/fiberhome_hg5585f-cu
   $(call Device/fiberhome_hg5585f-common)
   DEVICE_MODEL := HG5585F
   DEVICE_VARIANT := CU
-  DEVICE_DTS := an7581-fiberhome-hg5585f-cu
+  DEVICE_DTS := an7581-fiberhome-hg5585f-cu an7581-fiberhome-hg5585f-cu-recovery
   SUPPORTED_DEVICES += fiberhome,hg5585f-cu-usb-sfp
   $(call Device/fiberhome_hg5585f-images)
 endef
@@ -248,7 +268,7 @@ define Device/fiberhome_hg5585f-ct-usb-sfp
   $(call Device/fiberhome_hg5585f-common)
   DEVICE_MODEL := HG5585F
   DEVICE_VARIANT := CT-USB-SFP
-  DEVICE_DTS := an7581-fiberhome-hg5585f-ct-usb-sfp
+  DEVICE_DTS := an7581-fiberhome-hg5585f-ct-usb-sfp an7581-fiberhome-hg5585f-ct-usb-sfp-recovery
   DEVICE_PACKAGES += kmod-phy-maxlinear
   SUPPORTED_DEVICES += fiberhome,hg5585f-ct
   $(call Device/fiberhome_hg5585f-images)
@@ -259,7 +279,7 @@ define Device/fiberhome_hg5585f-cu-usb-sfp
   $(call Device/fiberhome_hg5585f-common)
   DEVICE_MODEL := HG5585F
   DEVICE_VARIANT := CU-USB-SFP
-  DEVICE_DTS := an7581-fiberhome-hg5585f-cu-usb-sfp
+  DEVICE_DTS := an7581-fiberhome-hg5585f-cu-usb-sfp an7581-fiberhome-hg5585f-cu-usb-sfp-recovery
   SUPPORTED_DEVICES += fiberhome,hg5585f-cu
   $(call Device/fiberhome_hg5585f-images)
 endef

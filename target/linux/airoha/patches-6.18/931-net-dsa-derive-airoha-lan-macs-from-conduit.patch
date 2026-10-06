@@ -1,0 +1,63 @@
+Subject: [PATCH] net: dsa: derive marked Airoha LAN MACs from conduit
+
+On marked Airoha switch ports derive LAN MACs from the RI-backed
+conduit instead of consecutive NVMEM addresses. Other DSA boards keep
+their existing MAC lookup and conduit inheritance behavior.
+
+The property is intentionally named after the Airoha hardware behavior,
+not a generic DSA binding.  Port i is derived from switch port i+1:
+
+    M[0] = D[0] | 0x02
+    M[1] = (D[1] & 0xf0) | i
+    if M[1] == D[1], M[1] = (D[1] & 0xf0) | 4
+
+---
+--- a/net/dsa/dsa.c
++++ b/net/dsa/dsa.c
+@@ -7,6 +7,7 @@
+ 
+ #include <linux/device.h>
+ #include <linux/err.h>
++#include <linux/etherdevice.h>
+ #include <linux/list.h>
+ #include <linux/module.h>
+ #include <linux/netdevice.h>
+@@ -445,6 +446,25 @@ static int dsa_port_setup(struct dsa_port
+ 	return dsa_tree_setup_default_cpu(dst);
+ }
+ 
++static int dsa_port_airoha_mac_from_conduit(struct dsa_port *dp)
++{
++	struct net_device *conduit = dsa_port_to_conduit(dp);
++
++	if (!conduit || !is_valid_ether_addr(conduit->dev_addr))
++		return -EPROBE_DEFER;
++
++	if (dp->index < 2 || dp->index > 4)
++		return -EINVAL;
++
++	ether_addr_copy(dp->mac, conduit->dev_addr);
++	dp->mac[0] |= 0x02;
++	dp->mac[1] = (conduit->dev_addr[1] & 0xf0) | (dp->index - 1);
++	if (dp->mac[1] == conduit->dev_addr[1])
++		dp->mac[1] = (conduit->dev_addr[1] & 0xf0) | 4;
++
++	return 0;
++}
++
+ static int dsa_port_setup(struct dsa_port *dp)
+ {
+ 	bool dsa_port_link_registered = false;
+@@ -512,6 +543,12 @@ static int dsa_port_setup(struct dsa_port
+ 		err = of_get_mac_address(dp->dn, dp->mac);
+ 		if (err == -EPROBE_DEFER)
+ 			break;
++		if (err && of_property_read_bool(dp->dn,
++						"airoha,mac-from-conduit")) {
++			err = dsa_port_airoha_mac_from_conduit(dp);
++			if (err)
++				break;
++		}
+ 
+ 		err = dsa_user_create(dp);
+ 		break;

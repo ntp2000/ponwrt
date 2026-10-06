@@ -1,0 +1,30 @@
+Subject: [PATCH] net: ethernet: airoha: prefer RI MAC on marked Nokia GDMs
+
+The stock bootloader may supply a mac-address property independently of
+the Linux ethernet aliases. On opt-in Nokia GDMs use the RI NVMEM cell
+instead, so a saved ethaddr cannot replace the configured LAN and PON
+addresses. A missing or invalid RI MAC is an error, not a reason to use
+the bootloader address or a random one.
+
+---
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -4543,7 +4543,17 @@ static int airoha_alloc_gdm_device(struc
+ 	if (err)
+ 		return err;
+ 
+-	err = of_get_ethdev_address(np, netdev);
++	if (of_property_read_bool(np, "airoha,mac-from-nvmem")) {
++		u8 addr[ETH_ALEN];
++
++		err = of_get_mac_address_nvmem(np, addr);
++		if (err)
++			return err;
++
++		eth_hw_addr_set(netdev, addr);
++	} else {
++		err = of_get_ethdev_address(np, netdev);
++	}
+ 	if (err) {
+ 		if (err == -EPROBE_DEFER)
+ 			return err;

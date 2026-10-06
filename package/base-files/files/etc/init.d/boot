@@ -50,6 +50,19 @@ boot() {
 
 	/sbin/kmodloader
 
+	# HG5585F RAM recovery starts with an empty writable overlay.  Reconcile
+	# config synchronously after both PCI radios exist, even if their hotplug
+	# detection has not finished. wifi config preserves existing radio settings.
+	case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
+	fiberhome,hg5585f-cu|fiberhome,hg5585f-ct)
+		if [ -f /etc/board.json ] && [ -x /sbin/wifi ]; then
+			echo "HG5585F: refreshing Wi-Fi config after kmodloader" > /dev/kmsg
+			/sbin/wifi config || echo "HG5585F: Wi-Fi config refresh failed" > /dev/kmsg
+			echo "HG5585F: configured Wi-Fi radios=$(uci -q show wireless | grep -c '=wifi-device$')" > /dev/kmsg
+		fi
+		;;
+	esac
+
 	uci_apply_defaults
 	sync
 

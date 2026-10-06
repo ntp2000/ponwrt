@@ -1,0 +1,101 @@
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+rem Native CMD only. Main throughput parameters match the r62 baseline.
+set "mode=%~1"
+set "server=%~2"
+set "output=%~3"
+set "iperf=%~dp0iperf3.exe"
+if not "%~4"=="" set "iperf=%~4"
+if not defined server goto usage
+if not defined output goto usage
+if not "%~5"=="" goto usage
+set "valid="
+for %%M in (5g 2g tcp) do if /i "!mode!"=="%%M" set "valid=1"
+if not defined valid goto usage
+rem Test uses the existing IPv4 topology, not arbitrary shell/host input.
+for /f "delims=0123456789." %%B in ("!server!") do goto usage
+if exist "!output!" (
+ echo ERROR: Use a NEW output directory. Existing logs are preserved.
+ exit /b 2
+)
+if not exist "!iperf!" if "%~4"=="" set "iperf=iperf3.exe"
+"!iperf!" --version >nul 2>&1
+if errorlevel 1 (
+ echo ERROR: Place iperf3.exe beside this BAT, on PATH, or pass its full path.
+ exit /b 2
+)
+mkdir "!output!" 2>nul
+if errorlevel 1 exit /b 2
+"!iperf!" --version >"!output!\version.txt" 2>&1
+"!iperf!" --help >"!output!\help.txt" 2>&1
+findstr /l /c:"--get-server-output" "!output!\help.txt" >nul
+if errorlevel 1 (
+ echo ERROR: This iperf3 does not support --get-server-output. Keep help.txt.
+ exit /b 2
+)
+set "limits="
+findstr /l /c:"--connect-timeout" "!output!\help.txt" >nul
+if not errorlevel 1 set "limits=!limits! --connect-timeout 5000"
+findstr /l /c:"--rcv-timeout" "!output!\help.txt" >nul
+if not errorlevel 1 set "limits=!limits! --rcv-timeout 10000"
+ver >"!output!\windows.txt"
+ipconfig >"!output!\address.txt"
+netsh wlan show interfaces >"!output!\link-before.txt" 2>&1
+netsh wlan show drivers >"!output!\drivers.txt" 2>&1
+netstat -s -p tcp >"!output!\tcp-before.txt" 2>&1
+>"!output!\manifest.txt" (
+ echo schema=63 mode=!mode! server=!server! port=5201
+ echo begin_local=!DATE! !TIME!
+ echo connect_receive_options=!limits!
+ echo power_mode=unchanged; RF_settings=unchanged; batch=16
+ echo tcp_statistics=system-wide background-inclusive; not flow retransmission proof
+)
+if /i "!mode!"=="2g" (
+ call :run p4 -R -P 4 -t 45
+ if errorlevel 1 goto failed
+ goto done
+)
+if /i "!mode!"=="tcp" (
+ call :run diagnostic -R -P 4 -t 30
+ if errorlevel 1 goto failed
+ goto done
+)
+call :run p1 -R -P 1 -t 90 -O 5
+if errorlevel 1 goto failed
+timeout /t 10 /nobreak >nul
+call :run p4 -R -P 4 -t 90 -O 5
+if errorlevel 1 goto failed
+timeout /t 20 /nobreak >nul
+call :run wake -R -P 4 -t 30
+if errorlevel 1 goto failed
+:done
+set "result=complete"
+set "rc=0"
+goto finish
+:failed
+set "result=failed; keep router and client evidence before restart"
+set "rc=1"
+:finish
+netsh wlan show interfaces >"!output!\link-after.txt" 2>&1
+netstat -s -p tcp >"!output!\tcp-after.txt" 2>&1
+>>"!output!\manifest.txt" echo end_local=!DATE! !TIME! result=!result!
+echo !result! Logs: "!output!"
+exit /b !rc!
+:run
+set "tag=%~1"
+set "args=%2 %3 %4 %5 %6 %7 %8 %9"
+>"!output!\!tag!.txt" (
+ echo !DATE! !TIME!
+ echo command="!iperf!" -c !server! -p 5201 !args! -i 1 --get-server-output !limits!
+)
+echo Running !mode! !tag! against !server! ...
+"!iperf!" -c !server! -p 5201 !args! -i 1 --get-server-output !limits! >>"!output!\!tag!.txt" 2>&1
+set "test_rc=!errorlevel!"
+>>"!output!\!tag!.txt" echo end_local=!DATE! !TIME! exit_code=!test_rc!
+exit /b !test_rc!
+:usage
+echo Usage: %~nx0 5g^|2g^|tcp SERVER_IPV4 NEW_LOG_DIR [PATH_TO_IPERF3.EXE]
+echo 5g: P1 90s / P4 90s / idle-wake P4 30s. 2g: P4 45s.
+echo tcp: separate 30s diagnostic with endpoint capture; not a throughput baseline.
+echo Select the Wi-Fi band in Windows before each invocation. Use the same PC.
+exit /b 2
