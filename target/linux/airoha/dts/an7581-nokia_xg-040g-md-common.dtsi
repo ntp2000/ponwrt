@@ -196,10 +196,17 @@
 	pinctrl-0 = <&mdio_pins>;
 };
 
+/* MD and TF alone use B for the PON netdev; MF keeps the shared B+1. */
+&gdm2 {
+	nvmem-cells = <&macaddr_factory_3e 0>;
+};
+
 &gsw_port2 {
 	status = "okay";
 
 	label = "lan2";
+	nvmem-cell-names = "mac-address";
+	nvmem-cells = <&macaddr_factory_3e 0x22>;
 };
 
 &gsw_phy2 {
@@ -228,6 +235,8 @@
 	status = "okay";
 
 	label = "lan3";
+	nvmem-cell-names = "mac-address";
+	nvmem-cells = <&macaddr_factory_3e 0x23>;
 };
 
 &gsw_phy3 {
@@ -252,6 +261,8 @@
 	status = "okay";
 
 	label = "lan4";
+	nvmem-cell-names = "mac-address";
+	nvmem-cells = <&macaddr_factory_3e 0x24>;
 };
 
 &gsw_phy4 {
@@ -280,8 +291,9 @@
 	phy-handle = <&en8811>;
 	phy-mode = "2500base-x";
 
+	airoha,mac-from-nvmem;
 	nvmem-cell-names = "mac-address";
-	nvmem-cells = <&macaddr_factory_3e (0)>;
+	nvmem-cells = <&macaddr_factory_3e 0x21>;
 };
 
 &usb0 {

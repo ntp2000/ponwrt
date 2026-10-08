@@ -59,14 +59,14 @@ snapshot.offload = { ppe: {}, ppe_flows: [], qdma: {}, software: [] };
 for (let line in split(readfile('/sys/kernel/debug/ppe/status') ?? '', '\n')) {
  let q = match(line, /^(qdma[0-9]+_channel[0-9]+) cpu=([0-9]+) fwd=([0-9]+) cpu_cfg=([0-9a-f]+) fwd_cfg=([0-9a-f]+)/);
  if (q) { snapshot.offload.qdma[q[1]] = { cpu: +q[2], fwd: +q[3], cpu_cfg: q[4], fwd_cfg: q[5] }; continue; }
- let flow = match(line, /^kite_flow /), reauth = match(line, /^r63_reauth /), learn = match(line, /^r64_learn /), values = {};
+ let flow = match(line, /^kite_flow /), reauth = match(line, /^r63_reauth /), learn = match(line, /^r64_learn /), scan = match(line, /^r66_scan /), values = {};
  for (let item in split(line, /\s+/)) {
   let m = match(item, /^([a-z_0-9]+)=(-?[0-9]+)$/);
   if (m) values[m[1]] = +m[2];
  }
  if (flow) { push(snapshot.offload.ppe_flows, values); continue; }
  for (let key, value in values)
-  snapshot.offload.ppe[reauth ? 'r63_reauth_' + key : (learn ? 'r64_learn_' + key : key)] = value;
+  snapshot.offload.ppe[reauth ? 'r63_reauth_' + key : (learn ? 'r64_learn_' + key : (scan ? 'r66_scan_' + key : key))] = value;
 }
 let rows = split(trim(readfile('/proc/net/stat/nf_flowtable') ?? ''), '\n');
 if (length(rows) > 1) {
@@ -84,7 +84,7 @@ let cached_dp = getenv('CLANKER_DP_SNAPSHOT');
 for (let path in cached_dp ? [cached_dp] : glob('/sys/kernel/debug/ieee80211/phy*/mt76/kite_datapath')) {
  let text = readfile(path);
  if (!text) continue;
- snapshot.kite_dp = { bands: {}, quality: {}, rx_observe: {}, performance: {}, perf: {}, observe: {}, observe_bands: {}, cycles: {}, gate_reasons: {}, contexts: {}, service: {}, service_load: {}, service_bands: {}, notify: {}, notify_host: {}, ba_activity: {}, activity: {}, r58: {}, r58_stages: {}, ba_local: {}, r59: {}, r59_hot: {}, r59_fallback: {}, r59_age: {}, r59_wa: {}, r59_wa_age: {}, r59_napi: {}, r59_ps: {}, r59_agg: {}, r59_agg_hw: {}, r60: {}, r61_ps: {}, r64: {}, r63: {}, r63_events: [] };
+ snapshot.kite_dp = { bands: {}, quality: {}, rx_observe: {}, performance: {}, perf: {}, observe: {}, observe_bands: {}, cycles: {}, gate_reasons: {}, contexts: {}, service: {}, service_load: {}, service_bands: {}, notify: {}, notify_host: {}, ba_activity: {}, activity: {}, r58: {}, r58_stages: {}, ba_local: {}, r59: {}, r59_hot: {}, r59_fallback: {}, r59_age: {}, r59_wa: {}, r59_wa_age: {}, r59_napi: {}, r59_ps: {}, r59_agg: {}, r59_agg_hw: {}, r60: {}, r61_ps: {}, r64: {}, r66: {}, r69: {}, r70: {}, r63: {}, r63_events: [] };
  for (let line in split(text, '\n')) {
   if (match(line, /^sta[0-9]+ /) || (!detail && match(line, /^r63_ps_event /))) continue;
   let band = match(line, /^band([01]) /), quality = match(line, /^quality_band([01]) /),
@@ -92,7 +92,7 @@ for (let path in cached_dp ? [cached_dp] : glob('/sys/kernel/debug/ieee80211/phy
       cyc = match(line, /^cycles_band([01])_stage([0-3]) /), gate = match(line, /^gate_reason([0-9]+) /),
       context = match(line, /^context_reason([0-9]+) /), values = {};
   for (let item in split(line, /\s+/)) {
-   let m = match(item, /^([a-z_0-9]+)=([0-9]+)$/);
+   let m = match(item, /^([a-z_0-9]+)=(-?[0-9]+)$/);
    if (m) values[m[1]] = +m[2];
   }
   let service = match(line, /^service_band([01]) /), activity = match(line, /^activity_sta([0-9]+) /);
@@ -101,6 +101,12 @@ for (let path in cached_dp ? [cached_dp] : glob('/sys/kernel/debug/ieee80211/phy
       age = match(line, /^r59_age([01])_([0-3]) /), napi = match(line, /^r59_napi([0-9]+) /),
       ps = match(line, /^r59_ps([0-9]+) /), agg = match(line, /^r59_agg([0-9]+) /), hw = match(line, /^r59_agg_hw([01]) /);
   if (match(line, /^r63_ps_event /)) { push(snapshot.kite_dp.r63_events, values); continue; }
+  let r70 = match(line, /^(r70_[a-z]+[0-9_]*)( |$)/);
+  if (r70) { snapshot.kite_dp.r70[r70[1]] = values; continue; }
+  let r69 = match(line, /^(r69_[a-z]+[0-9_]*)( |$)/);
+  if (r69) { snapshot.kite_dp.r69[r69[1]] = values; continue; }
+  let r66 = match(line, /^(r66_[a-z]+[0-9_]*)( |$)/);
+  if (r66) { snapshot.kite_dp.r66[r66[1]] = values; continue; }
   let r64 = match(line, /^(r64_[a-z]+[0-9]*)( |$)/);
   if (r64) { snapshot.kite_dp.r64[r64[1]] = values; continue; }
   let r63 = match(line, /^(r63|r63_[a-z]+[0-9]*)( |$)/);

@@ -27,8 +27,9 @@
 		pcs-handle = <&eth_pcs>;
 		phy-handle = <&en8811>;
 		phy-mode = "2500base-x";
+		airoha,mac-from-nvmem;
 		nvmem-cell-names = "mac-address";
-		nvmem-cells = <&macaddr_factory_3e 2>;
+		nvmem-cells = <&macaddr_factory_3e 0x21>;
 		openwrt,netdev-name = "lan1";
 		status = "okay";
 	};
@@ -39,8 +40,9 @@
 		managed = "in-band-status";
 		pcs-handle = <&usb_pcs>;
 		phy-mode = "2500base-x";
+		airoha,mac-from-nvmem;
 		nvmem-cell-names = "mac-address";
-		nvmem-cells = <&macaddr_factory_3e 3>;
+		nvmem-cells = <&macaddr_factory_3e 0x25>;
 		openwrt,netdev-name = "lan5";
 		status = "okay";
 	};

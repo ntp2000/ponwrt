@@ -8,9 +8,14 @@ set "iperf=%~dp0iperf3.exe"
 if not "%~4"=="" set "iperf=%~4"
 if not defined server goto usage
 if not defined output goto usage
-if not "%~5"=="" goto usage
+set "topology=%~5"
+if not defined topology set "topology=unspecified"
+if not "%~6"=="" goto usage
+set "topology_ok="
+for %%T in (wan lan unspecified) do if /i "!topology!"=="%%T" set "topology_ok=1"
+if not defined topology_ok goto usage
 set "valid="
-for %%M in (5g 2g tcp) do if /i "!mode!"=="%%M" set "valid=1"
+for %%M in (5g 2g tcp wired) do if /i "!mode!"=="%%M" set "valid=1"
 if not defined valid goto usage
 rem Test uses the existing IPv4 topology, not arbitrary shell/host input.
 for /f "delims=0123456789." %%B in ("!server!") do goto usage
@@ -40,15 +45,31 @@ findstr /l /c:"--rcv-timeout" "!output!\help.txt" >nul
 if not errorlevel 1 set "limits=!limits! --rcv-timeout 10000"
 ver >"!output!\windows.txt"
 ipconfig >"!output!\address.txt"
+route print !server! >"!output!\route-to-server.txt" 2>&1
 netsh wlan show interfaces >"!output!\link-before.txt" 2>&1
 netsh wlan show drivers >"!output!\drivers.txt" 2>&1
 netstat -s -p tcp >"!output!\tcp-before.txt" 2>&1
 >"!output!\manifest.txt" (
- echo schema=63 mode=!mode! server=!server! port=5201
+ echo schema=73 mode=!mode! server=!server! port=5201 topology=!topology!
+ echo topology_source=operator_label; actual_path_requires_router_and_address_evidence
  echo begin_local=!DATE! !TIME!
  echo connect_receive_options=!limits!
  echo power_mode=unchanged; RF_settings=unchanged; batch=16
  echo tcp_statistics=system-wide background-inclusive; not flow retransmission proof
+)
+if /i "!mode!"=="wired" (
+ call :run forward-p1 -P 1 -t 60 -O 5
+ if errorlevel 1 goto failed
+ timeout /t 5 /nobreak >nul
+ call :run reverse-p1 -R -P 1 -t 60 -O 5
+ if errorlevel 1 goto failed
+ timeout /t 5 /nobreak >nul
+ call :run forward-p4 -P 4 -t 60 -O 5
+ if errorlevel 1 goto failed
+ timeout /t 5 /nobreak >nul
+ call :run reverse-p4 -R -P 4 -t 60 -O 5
+ if errorlevel 1 goto failed
+ goto done
 )
 if /i "!mode!"=="2g" (
  call :run p4 -R -P 4 -t 45
@@ -94,8 +115,9 @@ set "test_rc=!errorlevel!"
 >>"!output!\!tag!.txt" echo end_local=!DATE! !TIME! exit_code=!test_rc!
 exit /b !test_rc!
 :usage
-echo Usage: %~nx0 5g^|2g^|tcp SERVER_IPV4 NEW_LOG_DIR [PATH_TO_IPERF3.EXE]
+echo Usage: %~nx0 5g^|2g^|tcp^|wired SERVER_IPV4 NEW_LOG_DIR [PATH_TO_IPERF3.EXE] [wan^|lan]
 echo 5g: P1 90s / P4 90s / idle-wake P4 30s. 2g: P4 45s.
+echo wired: both directions P1/P4 60s each; LAN1 stays WAN.
 echo tcp: separate 30s diagnostic with endpoint capture; not a throughput baseline.
 echo Select the Wi-Fi band in Windows before each invocation. Use the same PC.
 exit /b 2

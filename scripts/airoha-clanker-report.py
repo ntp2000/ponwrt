@@ -113,11 +113,17 @@ def performance_delta(a,b):
         if d.get('units') and 'cycles' in d:d['us_per_unit']=d['cycles']/hz/d['units']
         out['stages'][stage]=d
     al=old.get('service_load',{});bl=new.get('service_load',{})
-    if al.get('valid') and bl.get('valid') and al.get('revision')==bl.get('revision') and bl.get('revision') in (1,2):
+    if al.get('valid') and bl.get('valid') and al.get('revision')==bl.get('revision') and bl.get('revision') in (1,2,3):
         d=diffs(al,bl,('valid','revision'))
         if d.get('submit_packets'):
             d['submit_loop_us_per_packet']=d.get('submit_cycles',0)/hz/d['submit_packets']
         out['service_load']=d
+    if al.get('valid') and bl.get('valid') and al.get('revision')==bl.get('revision')==3:
+        x=old.get('r66',{}).get('r66_observe',{});y=new.get('r66',{}).get('r66_observe',{})
+        d=diffs(x,y,('pressure_max_cycles','snapshot_max_cycles','detail'))
+        for key in ('pressure_cycles','snapshot_cycles'):
+            if key in d:d[key.replace('_cycles','_total_us')]=d[key]/hz
+        out['r66']={'observation':d,'snapshots':new.get('r66',{})}
     ar=old.get('r58',{});br=new.get('r58',{})
     if ar.get('valid') and br.get('valid') and ar.get('batch')==br.get('batch'):
         out['r58']=diffs(ar,br,('valid','batch','pending_peak','pressure_pending','dma_wait','wa_wait','ready_wait','done_backlog','oldest_ticks'))
@@ -197,6 +203,24 @@ def performance_delta(a,b):
             elif key.startswith('r63_ps') and same_ps_identity(old,new,key[6:]):
                 out['r63']['counters'][key]=diffs(a,v,('queue_delay_max_ns',))
         out['r63']['events']=new.get('r63_events',[])
+    # Labels follow KDP_SERVICE_*; stage 1 measures DMA, never ARM host time.
+    out['stage_names']={'0':'wa_reap','1':'wfdma_completion','2':'submit','3':'publish'}
+    load=out.get('service_load',{})
+    if load.get('submit_packets'):
+        load['all_loops_us_per_submit_packet']=(load.get('submit_cycles',0)+load.get('other_cycles',0))/hz/load['submit_packets']
+        load['all_loops_includes_idle']=True
+    if new.get('r70'):
+        z=out['r70']={'txstatus':{},'age_valid':new['r70'].get('r70_observe',{}).get('age_valid')}
+        for band in ('0','1'):
+            key='r70_txstatus'+band;x=old.get('r70',{}).get(key,{});y=new['r70'].get(key,{})
+            d={k:y[k]-x[k] for k in ('mpdu','retries','final_failed') if k in x and k in y and y[k]>=x[k]}
+            if len(d)==3:
+                d['final_failure_fraction']=d['final_failed']/d['mpdu'] if d['mpdu'] else None
+                z['txstatus'][band]=d
+        z['scope']='MPDU status reported for all native/Kite TX, not payload token completions; absent headers do not prove zero failures'
+        if z['age_valid']==0:
+            if 'r59' in out:out['r59']['age']={}
+            if 'r58' in out:out['r58']['oldest_age_available']=False
     for wi,v in new.get('activity',{}).items():
         before=old.get('activity',{}).get(wi,{})
         if before and all(before.get(k)==v.get(k) for k in ('generation','key_generation','tag')):
@@ -273,7 +297,7 @@ def analyze(samples):
         row['offload'] = {'ppe': {}, 'qdma': {}, 'software': {}}
         old=a.get('offload',{});new=b.get('offload',{})
         for key,now in new.get('ppe',{}).items():
-            if key in ('abi','npu_attached','flow_stats','kite_ingress','kite_egress','kite_l4_bound','kite_session','kite_gate','kite_fault','kite_full_bucket','last_reason','r63_reauth_last_reason','r64_learn_budget','r64_learn_last_slot','r64_learn_last_reason','hash','policy','in_wcid','out_wcid','type') or key.endswith('errno'):continue
+            if key in ('abi','npu_attached','flow_stats','kite_ingress','kite_egress','kite_l4_bound','kite_session','kite_gate','kite_fault','kite_full_bucket','last_reason','r63_reauth_last_reason','r64_learn_budget','r64_learn_last_slot','r64_learn_last_reason','r66_scan_rx0','r66_scan_rx1','r66_scan_idle_remaining_jiffies','hash','policy','in_wcid','out_wcid','type') or key.endswith('errno'):continue
             before=old.get('ppe',{}).get(key)
             if before is not None:row['offload']['ppe'][key]=delta(before,now)
         row['offload']['ppe_snapshot']=new.get('ppe',{})

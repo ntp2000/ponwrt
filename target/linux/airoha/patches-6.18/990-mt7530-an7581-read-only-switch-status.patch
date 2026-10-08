@@ -1,0 +1,105 @@
+From: ponwrt maintainers
+Subject: [PATCH] r73: Expose a locked AN7581 configuration/PHY whitelist.
+
+Native incremental patch on release72. Ownership and datapath ABI unchanged.
+
+--- a/drivers/net/dsa/mt7530-mmio.c
++++ b/drivers/net/dsa/mt7530-mmio.c
+@@ -7,8 +7,89 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/reset.h>
+ #include <net/dsa.h>
++#include <linux/phy.h>
++#include <linux/rtnetlink.h>
+ 
+ #include "mt7530.h"
++
++/* AN7581 configuration-only whitelist. No MIB/ATC/read-clear registers.
++ * RTNL stabilizes DSA users/PHY attachment; each PHY read uses the PHY and
++ * MDIO locks. Never hold reg_mutex across a PHY/MDIO operation. */
++static ssize_t switch_status_show(struct device *dev,
++                                 struct device_attribute *attr, char *buf)
++{
++ struct mt7530_priv *priv = dev_get_drvdata(dev);
++ static const unsigned int ports[] = { 1, 2, 3, 4, 6 };
++ static const unsigned int globals[] = { MT753X_MFC, MT753X_GERLCR,
++                                        MT753X_CPORT_SPTAG_CFG };
++ static const unsigned int regs[] = { 0x3000, 0x3008, 0x3004,
++                                      0x2004, 0x2010, 0x2014, 0x1040 };
++ static const char * const names[] = { "pmcr", "pmsr", "pmeecr",
++                                       "pcr", "pvc", "ppbv1", "erlcr" };
++ static const unsigned int phyregs[] = { MII_BMCR, MII_ADVERTISE, MII_LPA,
++                                         MII_CTRL1000 };
++ ssize_t n = 0;
++ unsigned int i, j, value, reg;
++ int err;
++ if (!priv) return -ENODEV;
++ if (priv->id != ID_EN7581) return -EOPNOTSUPP;
++ rtnl_lock();
++ n += sysfs_emit_at(buf, n, "switch_abi=1 id=%u jiffies=%lu scope=configuration_only sequential_snapshot\n", priv->id, jiffies);
++ mutex_lock(&priv->reg_mutex);
++ for (i = 0; i < ARRAY_SIZE(globals); i++) {
++  value = 0;
++  err = regmap_read(priv->regmap, globals[i], &value);
++  n += sysfs_emit_at(buf, n, "global reg=%04x error=%d value=%08x\n", globals[i], err, value);
++ }
++ for (i = 0; i < ARRAY_SIZE(ports); i++) {
++  const struct dsa_port *dp = dsa_to_port(priv->ds, ports[i]);
++  n += sysfs_emit_at(buf, n, "port=%u netdev=%s", ports[i],
++                    dp->user ? dp->user->name : "cpu_or_unused");
++  for (j = 0; j < ARRAY_SIZE(regs); j++) {
++   reg = regs[j] + ports[i] * 0x100; value = 0;
++   err = regmap_read(priv->regmap, reg, &value);
++   n += sysfs_emit_at(buf, n, " %s=%08x %s_error=%d", names[j], value, names[j], err);
++  }
++  n += sysfs_emit_at(buf, n, "\n");
++ }
++ mutex_unlock(&priv->reg_mutex);
++ for (i = 0; i < ARRAY_SIZE(ports); i++) {
++  const struct dsa_port *dp = dsa_to_port(priv->ds, ports[i]);
++  struct phy_device *phy = dp->user ? dp->user->phydev : NULL;
++  if (!phy) {
++   n += sysfs_emit_at(buf, n, "phy_port=%u available=0\n", ports[i]);
++   continue;
++  }
++  mutex_lock(&phy->lock);
++  n += sysfs_emit_at(buf, n, "phy_port=%u available=1 addr=%d id=%08x link=%u speed=%d duplex=%d pause=%u asym_pause=%u",
++   ports[i], phy->mdio.addr, phy->phy_id, phy->link, phy->speed,
++   phy->duplex, phy->pause, phy->asym_pause);
++  for (j = 0; j < ARRAY_SIZE(phyregs); j++) {
++   err = phy_read(phy, phyregs[j]);
++   n += sysfs_emit_at(buf, n, " c22_%02x=%04x c22_%02x_error=%d",
++    phyregs[j], err < 0 ? 0 : err, phyregs[j], err < 0 ? err : 0);
++  }
++  for (j = MDIO_AN_EEE_ADV; j <= MDIO_AN_EEE_LPABLE; j++) {
++   err = phy_read_mmd(phy, MDIO_MMD_AN, j);
++   n += sysfs_emit_at(buf, n, " eee_%02x=%04x eee_%02x_error=%d",
++    j, err < 0 ? 0 : err, j, err < 0 ? err : 0);
++  }
++  n += sysfs_emit_at(buf, n, "\n");
++  mutex_unlock(&phy->lock);
++ }
++ rtnl_unlock();
++ return n;
++}
++static DEVICE_ATTR_RO(switch_status);
++static struct attribute *mt7988_status_attrs[] = {
++ &dev_attr_switch_status.attr, NULL,
++};
++static const struct attribute_group mt7988_status_group = {
++ .attrs = mt7988_status_attrs,
++};
++static const struct attribute_group *mt7988_status_groups[] = {
++ &mt7988_status_group, NULL,
++};
+ 
+ static const struct of_device_id mt7988_of_match[] = {
+ 	{ .compatible = "airoha,an7583-switch", .data = &mt753x_table[ID_AN7583], },
+@@ -91,6 +172,7 @@
+ 	.driver = {
+ 		.name = "mt7530-mmio",
+ 		.of_match_table = mt7988_of_match,
++		.dev_groups = mt7988_status_groups,
+ 	},
+ };
+ module_platform_driver(mt7988_platform_driver);

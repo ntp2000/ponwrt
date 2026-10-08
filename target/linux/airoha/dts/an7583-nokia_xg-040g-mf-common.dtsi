@@ -254,6 +254,7 @@
 	status = "okay";
 
 	label = "lan2";
+	airoha,mac-from-conduit;
 };
 
 &gsw_phy2 {
@@ -276,6 +277,7 @@
 	status = "okay";
 
 	label = "lan3";
+	airoha,mac-from-conduit;
 };
 
 &gsw_phy3 {
@@ -298,6 +300,7 @@
 	status = "okay";
 
 	label = "lan4";
+	airoha,mac-from-conduit;
 };
 
 &gsw_phy4 {
@@ -324,8 +327,9 @@
 	phy-handle = <&en8811>;
 	phy-mode = "2500base-x";
 
+	airoha,mac-from-nvmem;
 	nvmem-cell-names = "mac-address";
-	nvmem-cells = <&macaddr_factory_3e (0)>;
+	nvmem-cells = <&macaddr_factory_3e 0>;
 };
 
 &usb_phy {

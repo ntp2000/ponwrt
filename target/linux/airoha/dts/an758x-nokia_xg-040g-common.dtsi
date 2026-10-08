@@ -57,9 +57,10 @@
 &gdm2 {
 	/* GDM2 carries the PON GEM data plane on AN7581 and AN7583. */
 	airoha,pon-data-path;
-	/* WAN uses the eth0 MAC stored at RI offset 0x3e. */
+	airoha,mac-from-nvmem;
+	/* PON internal interfaces use B+1, not the physical LAN base. */
 	nvmem-cell-names = "mac-address";
-	nvmem-cells = <&macaddr_factory_3e 0>;
+	nvmem-cells = <&macaddr_factory_3e 1>;
 	status = "okay";
 };
 
@@ -86,6 +87,8 @@
 &gdm1 {
 	status = "okay";
 
+	airoha,mac-from-nvmem;
 	nvmem-cell-names = "mac-address";
-	nvmem-cells = <&macaddr_factory_3e 1>;
+	/* LAN conduit uses RI B, not U-Boot ethaddr. */
+	nvmem-cells = <&macaddr_factory_3e 0>;
 };

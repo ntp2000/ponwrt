@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=airoha-clanker-npu
-PKG_RELEASE:=65
+PKG_RELEASE:=74
 PKG_BUILD_DEPENDS:=airoha-riscv-toolchain/host
 PKG_BUILD_PARALLEL:=1
 PKG_SOURCE_PROTO:=git
@@ -11,7 +11,7 @@ PKG_MIRROR_HASH:=e115d22e0e49fa8060f8d94ae78d65dcac0460e89ce5fa2d09500bf48240821
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_SOURCE_VERSION)
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
-PKG_FILE_DEPENDS:=$(TOPDIR)/scripts/airoha-clanker-dhcp-repair.sh $(TOPDIR)/scripts/airoha-clanker-dhcp-diag.sh $(TOPDIR)/scripts/airoha-clanker-mode.uc $(TOPDIR)/scripts/airoha-clanker-offload.sh $(TOPDIR)/scripts/airoha-clanker-perf.uc $(TOPDIR)/scripts/airoha-clanker-diag.sh $(TOPDIR)/scripts/airoha-clanker-wifi-status.uc $(TOPDIR)/scripts/airoha-clanker-diag.init
+PKG_FILE_DEPENDS:=$(TOPDIR)/scripts/airoha-clanker-dhcp-repair.sh $(TOPDIR)/scripts/airoha-clanker-dhcp-diag.sh $(TOPDIR)/scripts/airoha-clanker-mode.uc $(TOPDIR)/scripts/airoha-clanker-lan-diag.sh $(TOPDIR)/scripts/airoha-clanker-offload.sh $(TOPDIR)/scripts/airoha-clanker-perf.uc $(TOPDIR)/scripts/airoha-clanker-diag.sh $(TOPDIR)/scripts/airoha-clanker-wifi-status.uc $(TOPDIR)/scripts/airoha-clanker-diag.init
 
 PKG_LICENSE:=NOASSERTION
 PKG_LICENSE_FILES:=README.md
@@ -34,9 +34,9 @@ define Package/airoha-en7581-clanker-mt7916-npu/description
   for this integration.
 endef
 
-# Native host dependency downloads, verifies and stages the r65 compiler.
-# An explicit override is useful for toolchain experiments, but equivalence
-# to r65 must then be checked again. Normal builds need no shell setup.
+# Native host dependency installs a pinned bare-metal RISC-V compiler into
+# staging_dir/hostpkg. An explicit override is available for diagnostics,
+# but the ordinary build remains self-contained and reproducible.
 CLANKER_RISCV_BIN ?= $(STAGING_DIR_HOSTPKG)/libexec/airoha-riscv/usr/bin
 CLANKER_CROSS ?= $(CLANKER_RISCV_BIN)/riscv64-unknown-elf-
 
@@ -57,9 +57,18 @@ define Build/Compile
 		'Release52 scope: remove optional proxy/tunnel packages from image; reduce healthy summaries only (DP/TX 60s, NPU 120s); unchanged NPU binary logic, ABI5, DMA memory layout and r51 datapath' \
 		'Release51 quality: fully revalidated identical flow refresh reuse; shared capture refs and retired deny guards; native L2 representative promotion; quality_band and dp_pause evidence; uplink acceleration deferred' \
 		'Kite GET31 legacy ownership ABI: 1; legacy capabilities: 0 (not DATAPATH state); lifecycle capability: 128 (development data mode); security fallback/meta/reorder capabilities: 256/1024/512' \
-		'Kite read-only diagnostics: GET32 ABI 1; 3 pages; 248-byte payload; page1 words43..58 completed-frame security/fallback counters, 59..60 reorder active/fences, 61 telemetry magic; page2 PCIe windows and WFDMA RX rings' \
+		'Kite read-only diagnostics: GET32 ABI 1; 7 pages; 248-byte payload; page1 words43..58 completed-frame security/fallback counters, 59..60 reorder active/fences, 61 telemetry magic; page2 PCIe windows and WFDMA RX rings; page3 KH2 host BUSY/reject/HOLD; page4 KP1 full PS exact-policy miss; page5/6 KC1 band costs' \
 		'Kite control: SET33/GET33 ABI 2; TX capability 2048, DATAPATH capability 4096; commands 14/15 TX bind/unbind, 16/17 DP bind/unbind, 18 RX purge; worker mask 0x1e' \
 		'Kite datapath: shared ABI 12 (tail-only PS/pressure/idle observations; DMA offsets preserved), TX ownership ABI 2; host/NPU shared RX PN authority; exact Linux flow admission; hardware FOE learning; TDMA PPE downlink, native TXD/TXP, WTBL TX PN/SN, DMA+WA completion' \
+		'Release74: 154/185/993; ABI12 unchanged; uncached KC1 revision74 and KP1, producer freshness; unsampled call elision; bounded STA context, bridge-first exact lookup, PS fast rejection with full final proof; profile0 normal / profile10 cold diagnostic, WED/cache batch16 single hart4' \
+		'Release73: 153/185/992; ABI12 unchanged; KC1 sampled inner costs, host tail and MPDU source evidence; locked GSW/PHY snapshot; upstream lifecycle fixes; schema7 profile10 WED/cache batch16 single hart4' \
+		'Release72: 152/184/989; ABI12 unchanged; bounded pre-DMA host BUSY retry; bridge FDB/VLAN GC revalidation; KH2 host congestion and KP1 exact-policy miss; schema6 complete wired-window evidence; profile0 WED/cache batch16 single hart4' \
+		'Release71: 151/184/987 + mac80211 606; ABI12 datapath unchanged from r70; flow/conntrack/refresh RCU lifetime repair; CPU-port PAUSE and read-only QDMA state; host rejection vs HOLD causes; recorder schema5; native profile0/profile6 cold-image comparison; lan1 remains WAN' \
+		'Release70: 150/184/985 + mac80211 606; ABI12 single hart4 batch16; compact TX-only private STA prefix, bounded session/epoch context and freed publication, profile-off skips token age stores; separate MPDU final failures; recorder schema4 physical pause/drop and endpoint evidence; wed/cache default on' \
+		'Release69: 149/183/985 + mac80211 606; ABI12 single hart4 batch16; default npu_cached_hdr=Y (self-tested fallback) and existing wed_enable=Y; corrected host L3 metadata/native QoS, BA completion schedules full PS proof, BIND-seeded fixed TXWI words with eight mutable writes, batched exact-hit statistics' \
+		'Release68: 148/182/985 + mac80211 606; ABI12 layout unchanged; opt-in npu_cached_hdr (default off) reads the TX header line through the hart4 D-cache after a 0xFC2 line invalidate, with on-core self-test reported as r68_cache' \
+		'Release67: 147/181/984 + mac80211 606; ABI12 unchanged; native-only TX BA for non-KDP peers when NPU ownership is provably absent; PS drain proof scans the band ring for the target WCID instead of refusing on any ready head; r67_fix counters' \
+		'Release66: 146/180/984 + mac80211 606; ABI12 batch16 single hart4; complete DMA76 TXWI, boot flags context, bounded pressure proof and word snapshots; two-stage PS queue drain with native scheduling, activity-aware ingress scans and real lightweight observation' \
 		'Release65: 145/179/983; ABI12 batch16 single hart4; exact last-policy probe; candidate-only learning; NAPI-batched PS progress; batched FE readout, bounded PPE/static cache, single-read lightweight collector' \
 		'Release64: 144/178/982; ABI12 unchanged; same-cookie L2 index refresh, exact suspended-rule retention, restartable learning, SRAM transition observation and batched counters, stage-coalesced PS progress, native authorized host fallback; batch16 single hart4' \
 		'Release63: 143/177/981; ABI12; native flow reauthorization after PS, progress-driven bounded drain, gate hold, private-key-first lookup and idle-token backpressure, batched WFDMA ownership fence, bounded cause/PS observations; full128 TXWI, batch16, single hart4' \
@@ -75,8 +84,8 @@ define Build/Compile
 		'Release54: 135/169/975 ABI7; QoS-map-compatible IPv4 parser; eight bounded positive hints per band; sampled hart4 cycles and DMA/WA ages; gate durations and PPE errno classes; native survey/queue aggregation evidence; npu_profile=6 by default, 0 disables sampling' \
 		'Performance candidate r53: 134/168/974; boot-only npu_perf and npu_amsdu controls; exact IPv4 hints and held-parse reuse; single-writer free/completion queues; native MCU-acknowledged A-MSDU length and per-TID BA contract; no broad L2 authorization' \
 		'Kite datapath limits: AN7581 MT7916 AP, open/CCMP unicast; unsupported security/4addr/PS/TWT/ACM use host paths; configured DSCP maps are supported; rx_free_only and tx_freed are ownership completion, not endpoint delivery proof' \
-		'Host integration candidate: firmware package release65; kernel patches 952-983; mt76 patches 120-179/release51; mac80211 release8/605; exact pre-route Ethernet matches use the reverse route gateway and peer, independently resolving DIRECT/NEIGH and post-NAT neighbors; native Ethernet MANGLE actions supply PPE output MACs; cookie replacements fully revalidate; identical live policies reuse; changed or invalid policies revoke, failed fences retain ownership; LAN bridge L2 capture publishes a separate capture authorization, NPU bridge policy carries IPv4/IPv6 TCP/UDP and ports, policy misses and non-L4/control frames use host fallback; bridge L4 and routed L4 hashes normalize wire IPv4/IPv6 types; fallback descriptors are fenced by session, band, station generation, key generation, DP authorization and VIF binding; 165 selects the station band PHY for host fallback and reports rejection reasons; WAN-routed PPE fast path remains unchanged; exact MAC-only bridge L2B egress is admitted by kernel patches 965-966; mt7915 recovery proof, idempotent reset, radio retry, persistent proven-stop retry with exponential backoff, timeout status resolution, transition snapshots, bounded event history and low-rate NPU/PPE/TX telemetry are patches 147-152/158-163; PPE learning scans are coalesced and serialized by kernel patches 963-964'; \
-		printf '%s\n' 'Patch set: 100-145 (applied by ImmortalWrt package prepare); host trace/recovery/performance patches 162-179 are applied by ImmortalWrt mt76 package prepare; Linux/Airoha patches 981-983 supply ABI12, resume/soft-owner lifetime and candidate learning/batched FE observation; 978 publishes bucket sequences'; \
+		'Host integration candidate: firmware package release74; kernel patches 952-993; mt76 patches 120-185/release58; mac80211 release9/606; exact pre-route Ethernet matches use the reverse route gateway and peer, independently resolving DIRECT/NEIGH and post-NAT neighbors; native Ethernet MANGLE actions supply PPE output MACs; cookie replacements fully revalidate; identical live policies reuse; changed or invalid policies revoke, failed fences retain ownership; LAN bridge L2 capture publishes a separate capture authorization, NPU bridge policy carries IPv4/IPv6 TCP/UDP and ports, policy misses and non-L4/control frames use host fallback; bridge L4 and routed L4 hashes normalize wire IPv4/IPv6 types; fallback descriptors are fenced by session, band, station generation, key generation, DP authorization and VIF binding; 165 selects the station band PHY for host fallback and reports rejection reasons; WAN-routed PPE fast path remains unchanged; exact MAC-only bridge L2B egress is admitted by kernel patches 965-966; mt7915 recovery proof, idempotent reset, radio retry, persistent proven-stop retry with exponential backoff, timeout status resolution, transition snapshots, bounded event history and low-rate NPU/PPE/TX telemetry are patches 147-152/158-163; PPE learning scans are coalesced and serialized by kernel patches 963-964'; \
+		printf '%s\n' 'Patch set: 100-154 (applied by ImmortalWrt package prepare); mt76 patches 120-185 via native package prepare; Linux/Airoha through 993, including 986 RCU lifetime, 987 host/CPU-port evidence, 988 bridge path GC, 989 KH2/KP1 diagnostics; shared ABI12 unchanged'; \
 		find $(CURDIR)/patches -maxdepth 1 -type f -printf '%f\n' | sort; \
 		$(CLANKER_CROSS)gcc --version | head -n 1; \
 		cd $(PKG_BUILD_DIR)/build/AN7581_MT7916 && sha256sum npu_rv32.bin npu_data.bin \
@@ -87,6 +96,7 @@ define Package/airoha-en7581-clanker-mt7916-npu/install
 	$(INSTALL_DIR) $(1)/lib/firmware/airoha $(1)/usr/sbin $(1)/usr/share $(1)/etc/init.d
 	$(INSTALL_BIN) $(TOPDIR)/scripts/airoha-clanker-dhcp-repair.sh $(1)/usr/sbin/airoha-clanker-dhcp-repair
 	$(INSTALL_BIN) $(TOPDIR)/scripts/airoha-clanker-dhcp-diag.sh $(1)/usr/sbin/airoha-clanker-dhcp-diag
+	$(INSTALL_BIN) $(TOPDIR)/scripts/airoha-clanker-lan-diag.sh $(1)/usr/sbin/airoha-clanker-lan-diag
 	$(INSTALL_BIN) $(TOPDIR)/scripts/airoha-clanker-offload.sh $(1)/usr/sbin/airoha-clanker-offload
 	$(INSTALL_BIN) $(TOPDIR)/scripts/airoha-clanker-diag.sh $(1)/usr/sbin/airoha-clanker-diag
 	$(INSTALL_DATA) $(TOPDIR)/scripts/airoha-clanker-mode.uc $(1)/usr/share/airoha-clanker-mode.uc

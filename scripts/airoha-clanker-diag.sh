@@ -23,7 +23,7 @@ status() {
 		fi
 	done
 	printf '\n'
-	for node in /sys/bus/platform/devices/*/clanker_status /sys/bus/platform/devices/*/clanker_rx_status; do
+	for node in /sys/bus/platform/devices/*/clanker_status /sys/bus/platform/devices/*/clanker_rx_status /sys/bus/platform/devices/*/clanker_host_status /sys/bus/platform/devices/*/clanker_path_status; do
 		[ -r "$node" ] || continue
 		found=1
 		printf '%s\n' "$node"
@@ -315,7 +315,7 @@ cat /proc/meminfo /proc/mounts
 section 'NPU platform binding and WiFi ownership'
 ls -l /sys/bus/platform/drivers/airoha-npu/
 cat /sys/module/mt7915e/parameters/npu_enable
-for param in npu_control npu_reorder npu_tx; do
+for param in wed_enable npu_cached_hdr npu_control npu_reorder npu_tx; do
 	[ -r "/sys/module/mt7915e/parameters/$param" ] || continue
 	printf '%s=' "$param"
 	cat "/sys/module/mt7915e/parameters/$param"
