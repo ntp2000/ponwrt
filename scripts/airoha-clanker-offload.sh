@@ -114,6 +114,7 @@ record() {
   ucode /usr/share/airoha-clanker-mode.uc "$expected_mode" >> "$destination/mode.log" 2>&1 || reason=mode-mismatch
  fi
  printf 'reason=%s samples=%s\n' "$reason" "$count" >> "$destination/manifest.txt"
+ wifi_verify "$destination" > "$destination/coverage.txt" 2>&1 || :
  trap - INT TERM HUP
  [ "$reason" = complete ]
 }
@@ -200,7 +201,7 @@ wifi_ports_snapshot() {
 wifi_network_snapshot() {
  section 'r73 network sample'; date -u
  read -r stamp unused < /proc/uptime; echo "network_begin=$stamp"
- for path in /sys/bus/platform/devices/*/clanker_host_status /sys/bus/platform/devices/*/clanker_path_status /sys/bus/platform/devices/*/clanker_cost_status /sys/bus/platform/devices/*/switch_status /sys/kernel/debug/ppe/frame_status /sys/kernel/debug/ppe/queue_status; do
+ for path in /sys/bus/platform/devices/*/clanker_host_status /sys/bus/platform/devices/*/clanker_path_status /sys/bus/platform/devices/*/clanker_cost_status /sys/bus/platform/devices/*/clanker_prof_status /sys/bus/platform/devices/*/clanker_pc_status /sys/bus/platform/devices/*/clanker_queue_status /sys/bus/platform/devices/*/clanker_feed_status /sys/bus/platform/devices/*/switch_status /sys/kernel/debug/ppe/frame_status /sys/kernel/debug/ppe/queue_status; do
   printf '\nnode=%s\n' "$path"
   if [ -r "$path" ]; then cat "$path"; else echo unavailable; fi
  done
@@ -222,10 +223,38 @@ wifi_network_snapshot() {
   done
  done
  wifi_forwarding_snapshot
+ wifi_queue_snapshot
  section 'softnet'; cat /proc/net/softnet_stat
  section 'IRQ'; cat /proc/interrupts
  section 'software flow handoffs'; cat /proc/net/stat/nf_flowtable 2>/dev/null || echo unavailable
  read -r stamp unused < /proc/uptime; echo "network_end=$stamp"
+}
+# Queue reads have no hardware writes or counter resets. Loss events are
+# metadata only, bounded by the driver; unsupported is never zero losses.
+wifi_queue_snapshot() {
+ section 'r78 native wireless queues'; cat /proc/uptime
+ for phy in /sys/kernel/debug/ieee80211/phy*; do
+  [ -d "$phy" ] || continue
+  for path in "$phy/aqm" "$phy/queue_loss" "$phy"/netdev:*/stations/*/aqm; do
+   printf 'queue_node=%s\n' "$path"
+   if [ -r "$path" ]; then
+    timeout -k 1 2 cat "$path" || echo queue_read_failed=1
+   else echo queue_unavailable=1; fi
+  done
+ done
+}
+wifi_light_snapshot() {
+ section 'r78 light counters'; date -u
+ cat /proc/uptime /proc/stat /proc/net/dev
+ echo recorder_proc_stat
+ cat "/proc/${CLANKER_RECORDER_PID:-$$}/stat" 2>/dev/null || :
+ for path in /sys/bus/platform/devices/*/clanker_status /sys/bus/platform/devices/*/clanker_queue_status; do
+  [ ! -r "$path" ] || cat "$path"
+ done
+ for path in /sys/kernel/debug/ieee80211/phy*/mt76/kite_datapath_light; do
+  [ -r "$path" ] || continue
+  cat "$path"; break
+ done
 }
 wifi_forwarding_snapshot() {
  section 'r72 forwarding: kernel bridge + driver self FDB, neighbours'
@@ -239,6 +268,11 @@ wifi_forwarding_snapshot() {
 }
 wifi_flow_snapshot() {
  section 'r72 bound FOE and test conntrack (low frequency)'; date -u; cat /proc/uptime
+ # Contains r75 PS empty/parked and policy lifecycle counters. Read at the
+ # existing slow cadence: status takes the flow mutex, unlike cached KF1.
+ echo 'node=/sys/kernel/debug/ppe/status'
+ timeout -k 1 4 cat /sys/kernel/debug/ppe/status
+ printf 'ppe_status_query_status=%s\n' "$?"
  timeout -k 1 4 cat /sys/kernel/debug/ppe/bind
  printf 'bind_query_status=%s\n' "$?"
  if [ -r /proc/net/nf_conntrack ]; then
@@ -284,15 +318,161 @@ wifi_link_timeline() {
   sleep 1
  done
 }
+# Control histories are separate from full datapath/PHY snapshots. Keep
+# only new events, report overwritten intervals, and never clear kernel rings.
+wifi_events() {
+ local directory=$1 kind path last rc
+ for kind in flow ps; do
+  path=/sys/kernel/debug/ppe/kite_history
+  if [ "$kind" = ps ]; then
+   path=
+   for candidate in /sys/kernel/debug/ieee80211/phy*/mt76/kite_ps_history; do
+    [ ! -r "$candidate" ] || { path=$candidate; break; }
+   done
+  fi
+  if [ ! -r "$path" ]; then printf 'events_unavailable=%s\n' "$kind"; continue; fi
+  last=0; [ ! -r "$directory/.event-$kind" ] || read -r last < "$directory/.event-$kind"
+  timeout -k 1 2 cat "$path" > "$directory/.event-current-$kind"
+  rc=$?; [ "$rc" -eq 0 ] || { printf 'events_read_failed=%s rc=%s\n' "$kind" "$rc"; continue; }
+  awk -v last="$last" -v kind="$kind" -v state="$directory/.event-$kind" '
+   /_ring / {print;for(i=1;i<=NF;i++)if($i ~ /^last=/){split($i,a,"=");if(a[2]+0<last){print "events_gap=" kind " serial_reset_after=" last;last=0;print 0 >state}}next}
+   /^r76_flow / || /^r63_ps_event / {
+    seq=0; for(i=1;i<=NF;i++) if($i ~ /^(seq|serial)=/) {split($i,a,"=");seq=a[2]+0}
+    if(seq>last){print;if(!first||seq<first)first=seq;if(seq>max)max=seq}
+   }
+   END {
+    if(last && first>last+1)print "events_gap=" kind " after=" last " next=" first;
+    if(max>last)print max >state;
+   }' "$directory/.event-current-$kind"
+ done
+}
+# On a new terminal loss counter, retain adjacent snapshots plus the
+# already-collected control history. At most eight bundles per recording.
+wifi_drop_checkpoint() {
+ local directory=$1 current=$2 value previous count=0
+ value=$(awk '/^band[01] / {for(i=1;i<=NF;i++)if($i ~ /^(tx_drop|host_fallback_drop)=/){split($i,a,"=");n+=a[2]}}END{print n+0}' "$current")
+ if [ -r "$directory/.last-drop" ]; then
+  read -r previous count < "$directory/.last-drop"
+  if [ "$value" != "$previous" ]; then
+   printf 'drop_change previous=%s current=%s bundle=%s uptime=' "$previous" "$value" "$count" >> "$directory/events.log"
+   cat /proc/uptime >> "$directory/events.log"
+   if [ "$count" -lt 8 ]; then
+    [ ! -s "$directory/.previous-datapath" ] || cp "$directory/.previous-datapath" "$directory/drop-$count-before.log"
+    cp "$current" "$directory/drop-$count-after.log"
+    cp "$directory/events.log" "$directory/drop-$count-events.log"
+    count=$((count+1))
+   fi
+  fi
+ fi
+ printf '%s %s\n' "$value" "$count" > "$directory/.last-drop"
+ cp "$current" "$directory/.previous-datapath"
+}
+wifi_queue_coverage() {
+ local directory=$1 file
+ for file in queues-start.log start.log network.log queues-finish.log finish.log; do
+  [ ! -r "$directory/$file" ] || cat "$directory/$file"
+ done | awk '
+  /^queue_node=/ {node=$0}
+  /^queue_loss_ring / || /^queue_burst_ring / {
+   kind=$1;first=last=0;
+   for(i=2;i<=NF;i++){split($i,a,"=");if(a[1]=="first")first=a[2]+0;if(a[1]=="last")last=a[2]+0}
+   key=node SUBSEP kind;
+   if(key in seen && last>=seen[key] && first>seen[key]+1) gap[kind]++;
+   if(!(key in seen)||last>seen[key])seen[key]=last;
+   found[kind]++;
+  }
+  END {
+   print "queue_packet_coverage=" (found["queue_loss_ring"]?(gap["queue_loss_ring"]?"PARTIAL":"AVAILABLE"):"MISSING");
+   print "queue_burst_coverage=" (found["queue_burst_ring"]?(gap["queue_burst_ring"]?"PARTIAL":"AVAILABLE"):"MISSING");
+   print "queue_scope=boundary_or_periodic_snapshots cumulative_counters_retained no_peer_delivery_proof";
+  }'
+}
+# Report evidence availability, never turn missing/failed tests into PASS.
+wifi_verify() {
+ local directory=$1 bounds started finished reason
+ [ -r "$directory/manifest.txt" ] || return 2
+ [ -s "$directory/finish.log" ] || { echo 'coverage=FAIL missing_finish'; return 1; }
+ [ -s "$directory/markers.log" ] || { echo 'coverage=INCOMPLETE missing_window_markers'; return 1; }
+ bounds=$(awk '{for(i=1;i<=NF;i++){split($i,a,"=");if(a[1]=="started_uptime")s=a[2];if(a[1]=="finished_uptime")f=a[2];if(a[1]=="reason")r=a[2]}}END{print s,f,r}' "$directory/manifest.txt")
+ read -r started finished reason <<EOF
+$bounds
+EOF
+ case "$reason" in complete|stopped) ;; *) echo "coverage=FAIL recorder_reason=$reason"; return 1;; esac
+ awk -v started="$started" -v finished="$finished" '
+  {u=0;l="";for(i=1;i<=NF;i++){split($i,a,"=");if(a[1]=="uptime")u=a[2];if(a[1]=="label")l=a[2]}}
+  l ~ /^begin-/ {k=substr(l,7);if(k in begin || u<started || u>finished)bad++;begin[k]=u;next}
+  l ~ /^end-/ {k=substr(l,5);sub(/-rc[0-9]+$/,"",k);if(!(k in begin)||u<begin[k]||u>finished)bad++;else{done[k]=1;print "window=" k " begin=" begin[k] " end=" u " status=" l}if(l !~ /-rc0$/)bad++}
+  END {for(k in begin){count++;if(!(k in done)){print "missing_end=" k;bad++}}print "coverage=" (bad||!count?"FAIL":"PASS") " windows=" count " errors=" bad;exit(bad||!count)}' "$directory/markers.log" || return 1
+ wifi_queue_coverage "$directory"
+ if [ -s "$directory/errors.log" ]; then echo 'coverage=INCOMPLETE collector_errors'; return 1; fi
+ if grep -q 'recording_mode=light' "$directory/manifest.txt"; then
+  echo 'event_coverage=not_collected light_mode; boundary_counters_only'
+  return 0
+ fi
+ [ -s "$directory/events.log" ] || { echo "coverage=INCOMPLETE missing_events"; return 1; }
+ if grep -qE 'events_(gap|unavailable|read_failed)=' "$directory/events.log"; then
+  echo 'coverage=INCOMPLETE event_history_gap'; return 1
+ fi
+}
 wifi_bounded() (
- # Child-only limit: failure preserves the recorder and its existing files.
- ulimit -f 16384
- timeout -k 2 25 "$0" "$@"
+ # RLIMIT_FSIZE limits the WHOLE destination file, including an existing
+ # append offset. Bound each new sample separately so a healthy trace can
+ # grow past 8 MiB on BusyBox while the outer 32 MiB budget remains active.
+ sample_file=$(mktemp "${destination:-${TMPDIR:-/tmp}}/.clanker-sample.XXXXXX") || exit 1
+ trap 'rm -f "$sample_file"' EXIT
+ (
+  ulimit -f 16384
+  exec timeout -k 2 25 "$0" "$@"
+ ) > "$sample_file"
+ sample_rc=$?
+ # Keep even a failed/truncated sample for diagnosis, preserving its exit
+ # status. This parent did not lower its file limit on the append target.
+ cat "$sample_file" || exit 1
+ exit "$sample_rc"
 )
+# Same flow parameters, much less collection during traffic. Do not claim
+# event coverage from this mode; detailed mode supplies the causal evidence.
+record_wifi_light() {
+ destination=$1; seconds=${2:-180}
+ case "$seconds" in ''|*[!0-9]*) return 2;; esac
+ [ "$seconds" -ge 30 ] && [ "$seconds" -le 1200 ] || return 2
+ command -v timeout >/dev/null || return 2
+ [ -n "$destination" ] && (umask 077; mkdir "$destination") || return 2
+ umask 077
+ reason=complete; wait_pid=; count=0
+ trap 'reason=interrupted; [ -z "$wait_pid" ] || kill "$wait_pid" 2>/dev/null' INT TERM HUP
+ export CLANKER_RECORDER_PID=$$
+ read -r started junk < /proc/uptime; started=${started%.*}
+ printf 'schema=10 collector_fix=79 recording_mode=light seconds=%s sleep_seconds=20 pid=%s started_uptime=%s\nreason=running\n' "$seconds" "$$" "$started" > "$destination/manifest.txt"
+ { date -u; cat /proc/sys/kernel/random/boot_id; cat /lib/firmware/airoha/en7581_MT7916_ClankerNPU_BUILDINFO.txt; } > "$destination/identity.log" 2>&1
+ wifi_bounded --wifi-light > "$destination/start.log" 2>&1 || reason=start-failed
+ wifi_bounded --wifi-radio > "$destination/radio-start.log" 2>&1 || echo radio_start_failed >> "$destination/errors.log"
+ wifi_bounded --wifi-queues > "$destination/queues-start.log" 2>&1 || echo queues_start_failed >> "$destination/errors.log"
+ echo "RECORD_READY mode=light directory=$destination"
+ while [ "$reason" = complete ]; do
+  read -r now junk < /proc/uptime
+  [ ! -f "$destination/stop.request" ] || { reason=stopped; break; }
+  [ "$(( ${now%.*} - started ))" -lt "$seconds" ] || break
+  wifi_bounded --wifi-light >> "$destination/trace.log" 2>> "$destination/errors.log" || { reason=sample-failed; break; }
+  count=$((count+1))
+  set -- $(du -sk "$destination"); [ "$1" -lt 32768 ] || { reason=size-limit; break; }
+  sleep 20 & wait_pid=$!
+  [ "$reason" = complete ] || kill "$wait_pid" 2>/dev/null
+  wait "$wait_pid" 2>/dev/null; wait_pid=
+ done
+ wifi_bounded --wifi-light > "$destination/finish.log" 2>&1 || echo finish_failed >> "$destination/errors.log"
+ wifi_bounded --wifi-radio > "$destination/radio-finish.log" 2>&1 || echo radio_finish_failed >> "$destination/errors.log"
+ wifi_bounded --wifi-queues > "$destination/queues-finish.log" 2>&1 || echo queues_finish_failed >> "$destination/errors.log"
+ read -r now junk < /proc/uptime
+ printf 'reason=%s samples=%s finished_uptime=%s\n' "$reason" "$count" "$now" >> "$destination/manifest.txt"
+ wifi_verify "$destination" > "$destination/coverage.txt" 2>&1 || :
+ trap - INT TERM HUP
+ [ "$reason" = complete ] || [ "$reason" = stopped ]
+}
 record_wifi() {
  destination=$1; seconds=${2:-180}
  case "$seconds" in ''|*[!0-9]*) return 2 ;; esac
- [ "$seconds" -ge 30 ] && [ "$seconds" -le 600 ] || return 2
+ [ "$seconds" -ge 30 ] && [ "$seconds" -le 1200 ] || return 2
  command -v timeout >/dev/null || { echo 'timeout is required' >&2; return 2; }
  [ -n "$destination" ] && (umask 077; mkdir "$destination") || return 2
  umask 077
@@ -301,7 +481,7 @@ record_wifi() {
  dp_snapshot="$destination/.datapath-current"
  export CLANKER_RECORDER_PID=$$
  read -r started junk < /proc/uptime; started=${started%.*}
- printf 'schema=7 cost_KC1=1 aggregation=1 switch_PHY=1 fdb_events=1 forwarding_every=2_samples network_every=2_samples topology_start_end=1 bind_every=6_samples detail_every=6_samples single_datapath_read=1 seconds=%s sleep_seconds=5 fast_sleep_seconds=1 pid=%s started_uptime=%s max_total_kib=32768; read-only\nreason=running\n' "$seconds" "$$" "$started" > "$destination/manifest.txt"
+ printf 'schema=10 collector_fix=79 recording_mode=full sample_limit=per_invocation events_delta=1 feed_FE1=1 ppe_status=1 queue_KF1=1 explicit_stop=1 markers=1 cost_KC1=1 aggregation=1 switch_PHY=1 fdb_events=1 forwarding_every=2_samples network_every=2_samples topology_start_end=1 bind_every=6_samples detail_every=6_samples single_datapath_read=1 seconds=%s sleep_seconds=5 fast_sleep_seconds=1 pid=%s started_uptime=%s max_total_kib=32768; read-only\nreason=running\n' "$seconds" "$$" "$started" > "$destination/manifest.txt"
  {
   section 'record identity'; date -u
   cat /proc/uptime /proc/sys/kernel/random/boot_id
@@ -315,9 +495,11 @@ record_wifi() {
  wifi_bounded --wifi-topology > "$destination/topology-start.log" 2>&1 || echo topology_start_failed >> "$destination/errors.log"
  wifi_bounded --wifi-network > "$destination/network.log" 2>&1 || echo network_start_failed >> "$destination/errors.log"
  wifi_bounded --wifi-sample "$dp_snapshot" 1 > "$destination/start.log" 2>&1 || reason=start-failed
+ wifi_bounded --wifi-events "$destination" > "$destination/events.log" 2>> "$destination/errors.log" || echo events_start_failed >> "$destination/errors.log"
+ wifi_drop_checkpoint "$destination" "$dp_snapshot"
  wifi_bounded --wifi-radio > "$destination/radio.log" 2>&1 || echo radio_start_failed >> "$destination/errors.log"
  wifi_bounded --wifi-ports > "$destination/ports.log" 2>&1 || echo ports_start_failed >> "$destination/errors.log"
- if [ "$reason" = complete ]; then
+ if [ "$reason" = complete ] && [ ! -f "$destination/stop.request" ]; then
   logread -f -F "$destination/system.log" -S 4096 &
   log_pid=$!
   timeout -k 2 "$seconds" "$0" --link-timeline "$seconds" > "$destination/link-timeline.log" 2>&1 &
@@ -325,12 +507,16 @@ record_wifi() {
   "$0" --fdb-events "$seconds" > "$destination/fdb-events.log" 2>&1 &
   fdb_pid=$!
  fi
+ echo "RECORD_READY mode=full directory=$destination"
  while [ "$reason" = complete ]; do
   read -r now junk < /proc/uptime
+  [ ! -f "$destination/stop.request" ] || { reason=stopped; break; }
   [ "$(( ${now%.*} - started ))" -lt "$seconds" ] || break
   printf 'sample=%s begin=%s\n' "$count" "$now" >> "$destination/timing.log"
+  wifi_bounded --wifi-events "$destination" >> "$destination/events.log" 2>> "$destination/errors.log" || echo events_sample_failed >> "$destination/errors.log"
   detail=0; [ "$((count % 6))" -eq 0 ] && detail=1
   wifi_bounded --wifi-sample "$dp_snapshot" "$detail" >> "$destination/trace.log" 2>> "$destination/errors.log" || { reason=sample-failed; break; }
+  wifi_drop_checkpoint "$destination" "$dp_snapshot"
   [ "$((count % 2))" -ne 0 ] || wifi_bounded --wifi-network >> "$destination/network.log" 2>&1 || echo network_sample_failed >> "$destination/errors.log"
   [ "$((count % 2))" -ne 0 ] || wifi_bounded --wifi-ports >> "$destination/ports.log" 2>&1 || echo ports_sample_failed >> "$destination/errors.log"
   [ "$((count % 6))" -ne 0 ] || wifi_bounded --wifi-flows >> "$destination/flows.log" 2>&1 || echo flows_sample_failed >> "$destination/errors.log"
@@ -339,6 +525,7 @@ record_wifi() {
   printf 'sample=%s end=%s\n' "$count" "$now" >> "$destination/timing.log"
   count=$((count + 1))
   set -- $(du -sk "$destination")
+  [ "$1" -lt 28672 ] || printf "budget_warning kib=%s cap=32768\n" "$1" >> "$destination/events.log"
   [ "$1" -lt 32768 ] || { reason=size-limit; break; }
   kill -0 "$log_pid" 2>/dev/null || { reason=logread-exited; break; }
   kill -0 "$link_pid" 2>/dev/null || { reason=timeline-exited; break; }
@@ -358,25 +545,65 @@ record_wifi() {
  wifi_bounded --wifi-network >> "$destination/network.log" 2>&1 || echo network_finish_failed >> "$destination/errors.log"
  wifi_bounded --wifi-flows >> "$destination/flows.log" 2>&1 || echo flows_finish_failed >> "$destination/errors.log"
  wifi_bounded --wifi-topology > "$destination/topology-finish.log" 2>&1 || echo topology_finish_failed >> "$destination/errors.log"
- rm -f "$dp_snapshot"
+ wifi_bounded --wifi-events "$destination" >> "$destination/events.log" 2>> "$destination/errors.log" || echo events_finish_failed >> "$destination/errors.log"
+ wifi_drop_checkpoint "$destination" "$dp_snapshot"
+ rm -f "$dp_snapshot" "$destination/.previous-datapath" "$destination/.event-current-flow" "$destination/.event-current-ps"
  read -r now junk < /proc/uptime
  printf 'reason=%s samples=%s finished_uptime=%s\n' "$reason" "$count" "$now" >> "$destination/manifest.txt"
+ wifi_verify "$destination" > "$destination/coverage.txt" 2>&1 || :
  trap - INT TERM HUP
- [ "$reason" = complete ]
+ [ "$reason" = complete ] || [ "$reason" = stopped ]
+}
+# Physical and switch evidence is collected outside each wired traffic
+# window, including light mode. Query failures stay explicit in the log.
+wifi_wired_boundary() {
+ section 'r78 wired boundary: GSW PHY BQL PAUSE'; date -u; cat /proc/uptime
+ for path in /sys/bus/platform/devices/*/switch_status /sys/kernel/debug/ppe/frame_status /sys/kernel/debug/ppe/queue_status; do
+  printf 'node=%s\n' "$path"
+  if [ -r "$path" ]; then cat "$path"; else echo unavailable; fi
+ done
+ wifi_ports_snapshot
+ wifi_topology_snapshot
+ cat /proc/uptime
+}
+# Markers contain only data. Never evaluate a path, label or recorded PID.
+wifi_mark() {
+ directory=$1; label=$2
+ [ -d "$directory" ] && [ -f "$directory/manifest.txt" ] || return 2
+ case "$label" in ''|*[!a-zA-Z0-9_.-]*) return 2;; esac
+ [ "${#label}" -le 80 ] || return 2
+ case "$label" in begin-wired-*)
+  wifi_bounded --wifi-wired-boundary > "$directory/boundary-$label.log" 2>&1 || {
+   echo "boundary_failed=$label" >> "$directory/errors.log"; return 1;
+  };; esac
+ read -r stamp unused < /proc/uptime
+ printf 'uptime=%s label=%s\n' "$stamp" "$label" >> "$directory/markers.log"
+ case "$label" in end-wired-*)
+  wifi_bounded --wifi-wired-boundary > "$directory/boundary-$label.log" 2>&1 || {
+   echo "boundary_failed=$label" >> "$directory/errors.log"; return 1;
+  };; esac
 }
 case "${1:-}" in
  '') snapshot ;;
  --check-mode) ucode /usr/share/airoha-clanker-mode.uc "${2:-invalid}" ;;
  --record-mode) record "${3:-}" "${4:-10}" "${2:-invalid}" ;;
  --record) record "${2:-}" "${3:-10}" ;;
+ --wifi-events) wifi_events "$2" ;;
+ --verify) wifi_verify "$2" ;;
  --wifi-sample) dp_snapshot=$2; wifi_trace_snapshot "$3" ;;
  --wifi-radio) wifi_radio_snapshot ;;
+ --wifi-queues) wifi_queue_snapshot ;;
+ --wifi-wired-boundary) wifi_wired_boundary ;;
+ --wifi-light) wifi_light_snapshot ;;
  --wifi-network) wifi_network_snapshot ;;
  --wifi-topology) wifi_topology_snapshot ;;
  --wifi-flows) wifi_flow_snapshot ;;
  --wifi-ports) wifi_ports_snapshot ;;
- --link-timeline) case "$2" in ''|*[!0-9]*) exit 2;; esac; [ "$2" -le 600 ] || exit 2; wifi_link_timeline "$2" ;;
- --fdb-events) case "$2" in ''|*[!0-9]*) exit 2;; esac; [ "$2" -ge 30 ] && [ "$2" -le 600 ] || exit 2; wifi_fdb_events "$2" ;;
+ --link-timeline) case "$2" in ''|*[!0-9]*) exit 2;; esac; [ "$2" -le 1200 ] || exit 2; wifi_link_timeline "$2" ;;
+ --fdb-events) case "$2" in ''|*[!0-9]*) exit 2;; esac; [ "$2" -ge 30 ] && [ "$2" -le 1200 ] || exit 2; wifi_fdb_events "$2" ;;
+ --mark) wifi_mark "${2:-}" "${3:-}" ;;
+ --stop) wifi_mark "${2:-}" stop-request && (umask 077; : > "$2/stop.request") ;;
+ --record-wifi-light) record_wifi_light "${2:-}" "${3:-180}" ;;
  --record-wifi|--record-lan) record_wifi "${2:-}" "${3:-180}" ;;
- *) echo 'Usage: airoha-clanker-offload [--record NEW_DIR MINUTES | --record-mode MODE NEW_DIR MINUTES | --record-wifi NEW_DIR SECONDS | --record-lan NEW_DIR SECONDS | --check-mode MODE]; MODE=off|software|hardware, MINUTES=1..120, SECONDS=30..600' >&2; exit 2 ;;
+ *) echo 'Usage: airoha-clanker-offload [--record NEW_DIR MINUTES | --record-mode MODE NEW_DIR MINUTES | --record-wifi NEW_DIR SECONDS | --record-wifi-light NEW_DIR SECONDS | --record-lan NEW_DIR SECONDS | --mark DIR LABEL | --stop DIR | --check-mode MODE]; MODE=off|software|hardware, MINUTES=1..120, SECONDS=30..1200' >&2; exit 2 ;;
 esac

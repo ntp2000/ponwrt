@@ -124,6 +124,8 @@ def performance_delta(a,b):
         for key in ('pressure_cycles','snapshot_cycles'):
             if key in d:d[key.replace('_cycles','_total_us')]=d[key]/hz
         out['r66']={'observation':d,'snapshots':new.get('r66',{})}
+    if new.get('r78'):
+        out['r78']={'snapshots':new['r78'],'scope':'per-STA current-generation longest negative probe; gauges are not deltas'}
     ar=old.get('r58',{});br=new.get('r58',{})
     if ar.get('valid') and br.get('valid') and ar.get('batch')==br.get('batch'):
         out['r58']=diffs(ar,br,('valid','batch','pending_peak','pressure_pending','dma_wait','wa_wait','ready_wait','done_backlog','oldest_ticks'))

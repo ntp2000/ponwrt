@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only r73 physical link timeline and endpoint evidence inventory.
+"""Read-only physical link timeline and endpoint evidence inventory.
 Usage: airoha-clanker-link-report.py ROUTER_DIR NEW_OUTPUT_DIR [--a DIR --b DIR]
-No rate from unsupported counters, no root-cause inference from empty TDMA alone.
+Reads detailed network.log and ordinary light trace.log; no rate from
+unsupported counters, no root-cause inference from empty TDMA alone.
 """
 import argparse,csv,json,re
 from pathlib import Path
@@ -66,8 +67,29 @@ def network_samples(text):
         end=re.search(r'^network_end=([0-9.]+)',block,re.M)
         if not end:continue
         row={'begin':float(block.splitlines()[0]),'end':float(end[1]),
-             'health':{},'host':{},'last':{},'retry':{},'path':{},'queues':[],'bql':[],'frame':None,'cost_health':{},'cost':{},'switch':[]}
+             'health':{},'host':{},'last':{},'retry':{},'path':{},'queues':[],'bql':[],'frame':None,'cost_health':{},'cost':{},'switch':[],'credit_health':{},'credit':{},'feed_health':{},'feed':{},
+             'load':[],'prof':[],'memory':[],'cpi':[],'pc_pages':[],'pc':[],'ps':[],'queue_copy':[]}
         for line in block.splitlines():
+            if line.startswith('feed available='):row['feed_health']=words(line)
+            if line.startswith('hart4_load '):row['load'].append(words(line))
+            if line.startswith('prof '):row['prof'].append(words(line))
+            if line.startswith('memory kind='):
+                m=re.match(r'memory kind=(\S+)\s+(.*)',line)
+                if m: row['memory'].append({'kind':m[1],**words(m[2])})
+            if line.startswith('cpi_band') or line.startswith('cpi'):
+                row['cpi'].append(words(line))
+            if line.startswith('pc_page='):row['pc_pages'].append(words(line))
+            if line.startswith('pc '):
+                m=re.match(r'pc\s+((?:0x)?[0-9a-fA-F]+)\s+(\d+)',line)
+                if m: row['pc'].append({'address':int(m[1],16),'samples':int(m[2])})
+            if line.startswith('r79_ps'):
+                row['ps'].append(words(line))
+            if line.startswith('queue_copy '):row['queue_copy'].append(words(line))
+            m=re.match(r'feed_band([01]) ',line)
+            if m:row['feed'][m[1]]=words(line)
+            if line.startswith('queue available='):row['credit_health']=words(line)
+            m=re.match(r'queue_band([01]) ',line)
+            if m:row['credit'][m[1]]=words(line)
             m=re.match(r'cost_band([01]) ',line)
             if m:row['cost_health'][m[1]]=words(line)
             m=re.match(r'cost([01])_(\d+) name=(\w+) ',line)
@@ -92,6 +114,30 @@ def network_samples(text):
                            row['health'].get('last_error')==0 and
                            row['health'].get('age_ms',100000)<=25000)
         rows.append(row)
+    return rows
+
+def light_hart4_load(text):
+    """Parse KF1 hart4 load pages from the ordinary light recorder.
+
+    The light recorder deliberately writes trace.log rather than network.log.
+    Keep the sample ordinal and uptime when present; these are counters, not
+    a timed CPU percentage.
+    """
+    rows=[]; current=None; sample=0
+    for line in text.splitlines():
+        if line.strip() == '--- r78 light counters ---':
+            sample += 1
+            current={'sample':sample,'source':'trace.log'}
+            continue
+        if current is None:
+            continue
+        m=re.match(r'^\s*(\d+(?:\.\d+)?)\s+\d+(?:\.\d+)?\s*$',line)
+        if m and 'uptime' not in current:
+            current['uptime']=float(m[1])
+            continue
+        if line.startswith('hart4_load '):
+            row=dict(current); row.update(words(line)); rows.append(row)
+            current=None
     return rows
 
 def host_intervals(samples):
@@ -151,6 +197,62 @@ def cost_intervals(samples):
                     'lifetime_max_us':v.get('max_cycles',0)/y['mhz']})
     return rows
 
+def feed_intervals(samples):
+    """FE1 deltas: descriptor doorbells are not air aggregation measurements."""
+    rows=[]
+    counters=['batches','packets','batch1','batch2_4','batch5_8','batch9_15','batch16',
+              'end_other','end_empty','end_token','end_credit','end_ps','end_gate',
+              'end_ring','end_budget','sampled_mixed','gap_samples','gap_cycles',
+              'ready_gap_samples','ready_gap_cycles']
+    def valid(h):
+        return (h.get('revision') in (76,77) and (h.get('revision')==76 or h.get('enabled')==1) and h.get('available')==1 and h.get('valid')==1
+                and h.get('last_error')==0 and h.get('age_ms',999999)<=25000
+                and h.get('producer_age_ms',999999)<=25000 and h.get('mhz',0)>0)
+    for a,b in zip(samples,samples[1:]):
+        x=a.get('feed_health',{});y=b.get('feed_health',{})
+        if not valid(x) or not valid(y) or x.get('seq')==y.get('seq'):continue
+        if any(x.get(k)!=y.get(k) for k in ('session','epoch','mhz','revision')):continue
+        if not 0<b['begin']-a['begin']<=60:continue
+        for band,v in b.get('feed',{}).items():
+            u=a.get('feed',{}).get(band,{})
+            if not all(k in u and k in v for k in counters):continue
+            d={k:(v[k]-u[k])&0xffffffff for k in counters}
+            rows.append({'band':band,'begin':a['begin'],'end':b['end'],**d,
+                         'packets_per_doorbell':d['packets']/d['batches'] if d['batches'] else None,
+                         'sampled_gap_us':d['gap_cycles']/y['mhz']/d['gap_samples'] if d['gap_samples'] else None,
+                         'last_wcid':v.get('last_wcid'),'last_tid':v.get('last_tid')})
+    return rows
+
+def queue_intervals(samples):
+    """KF1 gauges and wide wait times. Admission attempts are not drops."""
+    rows=[]
+    for a,b in zip(samples,samples[1:]):
+        x=a.get('credit_health',{});y=b.get('credit_health',{})
+        def valid(h):
+                return (h.get('revision') in (75,76,77,79) and h.get('available')==1 and h.get('valid')==1
+                    and h.get('last_error')==0 and h.get('age_ms',999999)<=25000
+                    and h.get('producer_age_ms',999999)<=25000 and h.get('mhz',0)>0)
+        if not valid(x) or not valid(y) or x.get('seq')==y.get('seq'):continue
+        if any(x.get(k)!=y.get(k) for k in ('session','epoch','mhz','revision')):continue
+        if not 0<b['begin']-a['begin']<=60:continue
+        for band,v in b.get('credit',{}).items():
+            u=a.get('credit',{}).get(band)
+            if not u:continue
+            row={'band':band,'begin':a['begin'],'end':b['end'],
+                 'free':y.get('free'),'pending':v.get('pending'),
+                 'owner_wcid':v.get('owner_wcid'),'owner_pending':v.get('owner_pending'),
+                 'producer_backlog':(y.get('producer',0)-y.get('consumer',0))&0xffffffff,
+                 'pressure_tick':y.get('pressure_tick'),'dma_wait':v.get('dma_wait'),
+                 'wa_wait':v.get('wa_wait'),'ready_wait':v.get('ready_wait')}
+            for k in ('credit_hold','no_buffer','released'):
+                if k in u and k in v:row[k]=(v[k]-u[k])&0xffffffff
+            for k in ('no_buffer_cycles','credit_cycles'):
+                if all(t in u and t in v for t in (k,k+'_hi')):
+                    old=(u[k+'_hi']<<32)|u[k];new=(v[k+'_hi']<<32)|v[k]
+                    if new>=old:row[k.replace('_cycles','_ms')]=(new-old)/y['mhz']/1000
+            rows.append(row)
+    return rows
+
 def endpoint(path):
     if not path or not path.is_dir():return {'available':False}
     files=list(path.rglob('*'));texts=[p for p in files if p.suffix=='.txt'];caps=[p for p in files if p.suffix=='.pcapng']
@@ -164,7 +266,12 @@ def endpoint(path):
 
 def write_csv(path,rows):
     with path.open('w',newline='') as f:
-        if rows:w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
+        if rows:
+            fields=[]
+            for row in rows:
+                for key in row:
+                    if key not in fields:fields.append(key)
+            w=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore');w.writeheader();w.writerows(rows)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('router',type=Path);p.add_argument('output',type=Path)
@@ -177,7 +284,32 @@ def main():
     network=network_samples(read('network.log'))
     write_csv(args.output/'host-returns.csv',host_intervals(network))
     write_csv(args.output/'wifi-costs.csv',cost_intervals(network))
-    result={'network':network,'manifest':read('manifest.txt'),'fast_samples':len(samples),'queries':queries,
+    write_csv(args.output/'wifi-queues.csv',queue_intervals(network))
+    write_csv(args.output/'wifi-feed.csv',feed_intervals(network))
+    def diagnostic_rows(key):
+        rows=[]
+        for sample in network:
+            for item in sample.get(key,[]):
+                rows.append({'begin':sample['begin'],'end':sample['end'],**item})
+        return rows
+    light_load=light_hart4_load(read('trace.log'))
+    for key,name in (('load','hart4-load.csv'),('prof','prof.csv'),('memory','prof-memory.csv'),
+                     ('cpi','prof-cpi.csv'),('pc_pages','prof-pc-pages.csv'),
+                     ('pc','prof-pc.csv'),('ps','ps-watchdog.csv'),
+                     ('queue_copy','queue-copy.csv')):
+        rows=diagnostic_rows(key)
+        if key == 'load':
+            rows += light_load
+        if key == 'ps':
+            # watchdog_runs includes 1-jiffy retry runs.  The 100 ms value is
+            # only the no-event fallback ceiling, so expose the unambiguous
+            # name without discarding the raw kernel field.
+            for row in rows:
+                if 'watchdog_runs' in row:
+                    row['non_event_runs']=row['watchdog_runs']
+                    row['watchdog_ceiling_ms']=row.get('watchdog_ms',100)
+        write_csv(args.output/name,rows)
+    result={'network':network,'manifest':read('manifest.txt'),'coverage':read('coverage.txt'),'markers':read('markers.log'),'events':read('events.log'),'fast_samples':len(samples),'queries':queries,
             'endpoint_A':endpoint(args.a),'endpoint_B':endpoint(args.b),
             'limits':['Physical counters have their own query windows; align using recorded times.',
                       'Do not sum eth0 and DSA slave byte counters as independent traffic.',
@@ -191,6 +323,8 @@ def main():
                       'KC1 stages have different call populations; do not sum means or extrapolate sampled loop counts to packets.',
                       'GSW/PHY snapshots are sequential; error fields mean unavailable, not a zero register.',
                       'QDMA/BQL are independent gauges, not atomic queue accounting; host page is cached 10s.']}
+    result['limits'].append('hart4_load from trace.log is a busy/idle service-round counter; it is not CPU time or a percentage.')
+    result['limits'].append('r79_ps watchdog_runs/non_event_runs includes 1-jiffy retries; watchdog_ceiling_ms is only the no-event fallback ceiling.')
     (args.output/'evidence.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
     print(f"{len(samples)} link samples, {len(queries)} queries; written to {args.output}")
 if __name__=='__main__':main()

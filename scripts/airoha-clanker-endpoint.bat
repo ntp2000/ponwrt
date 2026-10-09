@@ -3,6 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 rem Pure CMD. Server and bounded endpoint header capture run in separate windows.
 set "mode=%~1"
 if /i "!mode!"=="server" goto server
+if /i "!mode!"=="preflight" goto preflight
 if /i "!mode!"=="capture" goto capture
 if /i "!mode!"=="cpu" goto cpu
 goto usage
@@ -28,6 +29,32 @@ set "rc=!errorlevel!"
 call :metadata after
 >>"!output!\server.txt" echo !DATE! !TIME! server_exit=!rc!
 exit /b !rc!
+:preflight
+set "nic=%~2"
+set "output=%~3"
+if not defined nic goto usage
+if not defined output goto usage
+for /f "delims=0123456789" %%V in ("!nic!") do goto usage
+call :newdir
+if errorlevel 1 exit /b 2
+set "dumpcap=%ProgramFiles%\Wireshark\dumpcap.exe"
+if not exist "!dumpcap!" set "dumpcap=dumpcap.exe"
+"!dumpcap!" -v >"!output!\capture-version.txt" 2>&1
+if errorlevel 1 goto preflight_failed
+"!dumpcap!" -D >"!output!\interfaces.txt" 2>&1
+if errorlevel 1 goto preflight_failed
+"!dumpcap!" -i !nic! -L >"!output!\ready.txt" 2>&1
+if errorlevel 1 goto preflight_failed
+rem A real finite open verifies Npcap permission before the test session.
+"!dumpcap!" -i !nic! -f "tcp port 5201" -s 128 -a duration:2 -w "!output!\preflight.pcapng" >"!output!\open.txt" 2>&1
+if errorlevel 1 goto preflight_failed
+>"!output!\result.txt" echo capture_preflight=PASS nic=!nic!
+echo Capture preflight PASS. Keep this folder with test logs.
+exit /b 0
+:preflight_failed
+>"!output!\result.txt" echo capture_preflight=FAIL nic=!nic!
+echo ERROR: Capture preflight failed. Inspect this folder before diagnostic tests.
+exit /b 2
 :capture
 set "nic=%~2"
 set "peer=%~3"
@@ -108,14 +135,34 @@ exit /b !errorlevel!
  tzutil /g
  w32tm /query /status
  ipconfig /all
- netsh interface tcp show global
- netsh interface ipv4 show subinterfaces
- netstat -e
- netstat -s -p tcp
+netsh interface tcp show global
+netsh interface tcp show heuristics
+netsh interface tcp show supplemental
+netsh interface ipv4 show interfaces
+netsh interface ipv4 show config
+netsh interface ipv4 show subinterfaces
+netsh interface ipv4 show tcpstats
+netstat -e
+netstat -s -p tcp
+)
+call :wired_registry "%~1"
+exit /b 0
+:wired_registry
+set "tag=%~1"
+set "class=HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+rem CMD-only registry capture of common wired NIC performance properties.
+rem Read only instance values; excludes huge Ndi parameter-description subtrees.
+>"!output!\!tag!-nic-registry.txt" (
+ for /f "delims=" %%K in ('reg query "!class!" 2^>nul ^| findstr /r "\\[0-9][0-9][0-9][0-9]$"') do reg query "%%K" 2>&1
+)
+>"!output!\!tag!-tcp-registry.txt" (
+ reg query "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" 2>&1
+ reg query "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces" /s 2>&1
 )
 exit /b 0
 :usage
 echo Usage: %~nx0 server NEW_DIR [PATH_TO_IPERF3.EXE]
+echo        %~nx0 preflight NIC_INDEX NEW_DIR
 echo        %~nx0 capture NIC_INDEX TEST_SERVER_IPV4 NEW_DIR [SECONDS_30_TO_600]
 echo        %~nx0 cpu NEW_DIR [SECONDS_30_TO_600]
 echo Find NIC_INDEX using "%%ProgramFiles%%\Wireshark\dumpcap.exe" -D
